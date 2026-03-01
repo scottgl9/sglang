@@ -1414,6 +1414,14 @@ class NativeSparseAttnBackend(
                     page_size=1,
                 )
 
+        # todo hisparse: to cover more backends
+        if forward_batch.hisparse_coordinator is not None:
+            page_table_1 = (
+                forward_batch.token_to_kv_pool.translate_loc_to_hisparse_device(
+                    page_table_1
+                )
+            )
+
         if nsa_impl == "tilelang":
             if q_rope is not None:
                 q_all = concat_mla_absorb_q_general(q_nope, q_rope)
@@ -1555,6 +1563,14 @@ class NativeSparseAttnBackend(
                 page_table=metadata.page_table_1,
                 topk_indices=topk_indices,
                 page_size=1,
+            )
+
+        # todo, override the topk_indices calculation
+        if forward_batch.hisparse_coordinator is not None:
+            page_table_1 = (
+                forward_batch.token_to_kv_pool.translate_loc_to_hisparse_device(
+                    page_table_1
+                )
             )
 
         if self.nsa_decode_impl == "flashmla_sparse":
@@ -2050,6 +2066,7 @@ class NativeSparseAttnBackend(
                 and sum_seq_lens
                 <= forward_batch.get_max_chunk_capacity()  # Fits in chunk
                 and (not is_nsa_enable_prefill_cp())  # CP not enabled
+                and (forward_batch.hisparse_coordinator is None)
             )
         else:
             self.use_mha = False  # Decode/verify always use MLA

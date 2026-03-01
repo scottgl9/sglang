@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from typing import Any, Dict
 
     from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
     from sglang.srt.managers.scheduler_metrics_mixin import PrefillStats
     from sglang.srt.speculative.eagle_info import EagleDraftInput
     from sglang.srt.speculative.spec_info import SpecInput, SpeculativeAlgorithm
@@ -813,6 +814,10 @@ class Req(ReqDllmMixin):
         # For diffusion LLM
         self.init_diffusion_llm(dllm_config)
 
+        # For hisparse
+        self.staging = False
+        self.batch = None
+
     @property
     def seqlen(self) -> int:
         """Get the current sequence length of the request."""
@@ -1324,6 +1329,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     dp_cooperation_info: Optional[DPCooperationInfo] = None
     prefill_stats: Optional[PrefillStats] = None
 
+    # HiSparse
+    hisparse_coordinator: Optional[HiSparseCoordinator] = None
+
     @classmethod
     def init_new(
         cls,
@@ -1343,7 +1351,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
             is_hybrid_swa = True
 
-        return cls(
+        batch = cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
@@ -1362,6 +1370,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             chunked_req=chunked_req,
             dllm_config=dllm_config,
         )
+        # todo hisparse: hack for staging batch
+        for r in reqs:
+            r.batch = batch
+        return batch
 
     def batch_size(self):
         return len(self.reqs)
@@ -1991,7 +2003,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Allocate memory
         self.out_cache_loc = alloc_for_decode(self, token_per_req=1)
+        if self.hisparse_coordinator is not None:
+            self.hisparse_coordinator.map_last_loc_to_buffer(
+                self.out_cache_loc, self.req_pool_indices
+            )
 
+        # todo hisparse: be careful about meta data modification
         # Update req-level memory management fields
         for req in self.reqs:
             req.decode_batch_idx += 1

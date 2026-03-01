@@ -332,6 +332,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.forward_pass_id = 0
         self.init_new_workspace = False
         self.draft_model_idx = draft_model_idx
+        self.enable_hisparse = server_args.enable_hisparse
 
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
@@ -425,6 +426,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # For weight updates
         self._model_update_group = {}
         self._weights_send_group = {}
+
+        # For hisparse
+        self.hisparse_coordinator = None
 
     def init_mindspore_runner(self):
         # Init the mindspore runner
@@ -2486,6 +2490,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 server_args=self.server_args,
             )
 
+        forward_batch.hisparse_coordinator = self.hisparse_coordinator
         if forward_batch.forward_mode.is_decode():
             ret = self.forward_decode(
                 forward_batch,

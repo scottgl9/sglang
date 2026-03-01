@@ -188,6 +188,8 @@ class SchedulerOutputProcessorMixin:
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
+                        if self.enable_hisparse:
+                            self.hisparse_coordinator.admit_request_into_staging(req)
 
                     self.maybe_collect_customized_info(i, req, logits_output)
 
@@ -484,6 +486,8 @@ class SchedulerOutputProcessorMixin:
                     if not self.decode_offload_manager.offload_kv_cache(req):
                         release_kv_cache(req, self.tree_cache)
                 else:
+                    if self.enable_hisparse:
+                        self.hisparse_coordinator.request_finished(req)
                     release_kv_cache(req, self.tree_cache)
 
                 req.time_stats.completion_time = time.perf_counter()
@@ -542,6 +546,11 @@ class SchedulerOutputProcessorMixin:
                 self.log_decode_stats(can_run_cuda_graph, running_batch=batch)
             self.log_decode_stats_every_iteration(
                 batch, num_accepted_tokens=result.num_accepted_tokens
+            )
+
+        if self.enable_hisparse:
+            self.hisparse_coordinator.update_requests_after_decode(
+                [req for req in batch.reqs if not req.finished()]
             )
 
     def _mamba_prefix_cache_update(

@@ -73,6 +73,7 @@ from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
 from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
 from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
+from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
 from sglang.srt.managers.io_struct import (
     AbortReq,
     ActiveRanksOutput,
@@ -326,6 +327,8 @@ class Scheduler(
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.enable_hicache_storage = server_args.hicache_storage_backend is not None
         self.max_recv_per_poll = envs.SGLANG_SCHEDULER_MAX_RECV_PER_POLL.get()
+        self.enable_hisparse = server_args.enable_hisparse
+        self.hisparse_coordinator: Optional[HiSparseCoordinator] = None
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
@@ -725,6 +728,22 @@ class Scheduler(
                 )
             else:
                 self.tree_cache = RadixCache(params)
+
+        if self.enable_hisparse:
+            # todo hisparse: hardcode some hisparse config here for now
+            self.hisparse_coordinator = HiSparseCoordinator(
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                top_k=2048,
+                device_buffer_size=4096,
+                device=self.device,
+                tp_group=(
+                    self.attn_tp_cpu_group
+                    if self.server_args.enable_dp_attention
+                    else self.tp_cpu_group
+                ),
+            )
+            self.tp_worker.register_hisparse_coordinator(self.hisparse_coordinator)
 
         if (
             server_args.disaggregation_mode == "decode"
@@ -1895,31 +1914,47 @@ class Scheduler(
             chunked_req_to_exclude.add(self.chunked_req)
             self.stash_chunked_request(self.chunked_req)
 
-        if self.last_batch and self.last_batch.forward_mode.is_extend():
-            if self.last_batch.chunked_req is not None:
-                # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
-                # We need to discard it.
-                chunked_req_to_exclude.add(self.last_batch.chunked_req)
-
-            if self.dllm_config is not None and self.last_batch.reqs:
-                chunked_req_to_exclude.update(self.last_batch.reqs)
-
-            # Filter batch
-            last_bs = self.last_batch.batch_size()
-            self.last_batch.filter_batch(
-                chunked_req_to_exclude=list(chunked_req_to_exclude)
-            )
-            if self.last_batch.batch_size() < last_bs:
-                self.running_batch.batch_is_full = False
-
-            # Merge the new batch into the running batch.
-            # For prefill-only batch, we can avoid going through decoding step.
-            if not self.last_batch.is_empty() and not self.last_batch.is_prefill_only:
+        if self.enable_hisparse:
+            hisparse_batch = self.hisparse_coordinator.collect_ready_batch()
+            if hisparse_batch is not None:
+                if hisparse_batch.chunked_req is not None:
+                    chunked_req_to_exclude.add(hisparse_batch.chunked_req)
+                hisparse_batch.filter_batch(
+                    chunked_req_to_exclude=list(chunked_req_to_exclude)
+                )
                 if self.running_batch.is_empty():
-                    self.running_batch = self.last_batch
+                    self.running_batch = hisparse_batch
                 else:
-                    # Merge running_batch with prefill batch
-                    self.running_batch.merge_batch(self.last_batch)
+                    self.running_batch.merge_batch(hisparse_batch)
+        else:
+            if self.last_batch and self.last_batch.forward_mode.is_extend():
+                if self.last_batch.chunked_req is not None:
+                    # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
+                    # We need to discard it.
+                    chunked_req_to_exclude.add(self.last_batch.chunked_req)
+
+                if self.dllm_config is not None and self.last_batch.reqs:
+                    chunked_req_to_exclude.update(self.last_batch.reqs)
+
+                # Filter batch
+                last_bs = self.last_batch.batch_size()
+                self.last_batch.filter_batch(
+                    chunked_req_to_exclude=list(chunked_req_to_exclude)
+                )
+                if self.last_batch.batch_size() < last_bs:
+                    self.running_batch.batch_is_full = False
+
+                # Merge the new batch into the running batch.
+                # For prefill-only batch, we can avoid going through decoding step.
+                if (
+                    not self.last_batch.is_empty()
+                    and not self.last_batch.is_prefill_only
+                ):
+                    if self.running_batch.is_empty():
+                        self.running_batch = self.last_batch
+                    else:
+                        # Merge running_batch with prefill batch
+                        self.running_batch.merge_batch(self.last_batch)
 
         if self.dllm_config is not None:
             new_batch = self.get_new_batch_dllm()
@@ -2256,6 +2291,8 @@ class Scheduler(
 
             for req in retracted_reqs:
                 self._add_request_to_queue(req, is_retracted=True)
+                if self.enable_hisparse:
+                    self.hisparse_coordinator.retract_req(req)
         else:
             self.new_token_ratio = max(
                 self.new_token_ratio - self.new_token_ratio_decay,

@@ -12,6 +12,10 @@ from sglang.srt.mem_cache.allocator import (
     PagedTokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
 )
+from sglang.srt.mem_cache.hisparse_memory_pool import (
+    HiSparseNSATokenToKVPool,
+    HiSparseTokenToKVPoolAllocator,
+)
 from sglang.srt.mem_cache.memory_pool import (
     DoubleSparseTokenToKVPool,
     HybridLinearKVPool,
@@ -503,6 +507,7 @@ class ModelRunnerKVCacheMixin:
                     enable_memory_saver=self.server_args.enable_memory_saver,
                     start_layer=self.start_layer,
                     end_layer=self.end_layer,
+                    enable_hisparse=self.enable_hisparse,
                 )
             else:
                 from sglang.srt.hardware_backend.npu.memory_pool_npu import (
@@ -524,7 +529,12 @@ class ModelRunnerKVCacheMixin:
                     end_layer=self.end_layer,
                 )
         elif self.use_mla_backend and is_nsa_model:
-            self.token_to_kv_pool = NSATokenToKVPool(
+            nsa_pool = (
+                NSATokenToKVPool
+                if not self.enable_hisparse
+                else HiSparseNSATokenToKVPool
+            )
+            self.token_to_kv_pool = nsa_pool(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
                 dtype=self.kv_cache_dtype,
@@ -712,7 +722,18 @@ class ModelRunnerKVCacheMixin:
                         need_sort=need_sort,
                     )
                 else:
-                    if self.page_size == 1:
+                    if self.enable_hisparse:
+                        self.token_to_kv_pool_allocator = (
+                            HiSparseTokenToKVPoolAllocator(
+                                self.max_total_num_tokens,
+                                page_size=self.page_size,
+                                dtype=self.kv_cache_dtype,
+                                device=self.device,
+                                kvcache=self.token_to_kv_pool,
+                                need_sort=need_sort,
+                            )
+                        )
+                    elif self.page_size == 1:
                         self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
                             self.max_total_num_tokens,
                             dtype=self.kv_cache_dtype,
