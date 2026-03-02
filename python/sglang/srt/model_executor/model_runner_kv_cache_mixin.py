@@ -355,10 +355,11 @@ class ModelRunnerKVCacheMixin:
         if self.mambaish_config is not None:
             additional_ratio = 0
             if self.server_args.enable_mamba_extra_buffer():
-                if not self.spec_algorithm.is_none():
-                    additional_ratio = MAMBA_CACHE_V2_ADDITIONAL_RATIO_NO_OVERLAP
-                else:
+                # ping-pong buffer size is 2 when overlap schedule is on, 1 otherwise.
+                if not self.server_args.disable_overlap_schedule:
                     additional_ratio = MAMBA_CACHE_V2_ADDITIONAL_RATIO_OVERLAP
+                else:
+                    additional_ratio = MAMBA_CACHE_V2_ADDITIONAL_RATIO_NO_OVERLAP
             if self.server_args.disable_radix_cache:
                 ratio = 1
             else:
