@@ -269,7 +269,7 @@ class HiSparseCoordinator:
             if seq_len <= self.device_buffer_size:
                 device_indices = self.req_to_device_buffer[req_idx, selected_tokens]
             else:
-                special_tokens_mask = selected_tokens == seq_len
+                special_tokens_mask = selected_tokens == seq_len - 1
                 host_indices = self.req_to_host_pool[
                     req_idx, selected_tokens[~special_tokens_mask]
                 ]
@@ -284,7 +284,7 @@ class HiSparseCoordinator:
                     self.mem_pool_device,
                     host_indices,
                     device_indices[~special_tokens_mask],
-                    layer_id - self.mem_pool_device.start_layer,
+                    layer_id,
                     io_backend="kernel",
                 )
             top_k_indices[i][:top_n] = device_indices.to(torch.int32)

@@ -1558,16 +1558,16 @@ class NativeSparseAttnBackend(
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         if forward_batch.hisparse_coordinator is not None:
-            page_table_1 = forward_batch.hisparse_coordinator.get_front_topk_tokens(
-                forward_batch.req_pool_indices,
-                forward_batch.seq_lens,
-            )
-            # page_table_1 = forward_batch.hisparse_coordinator.naive_load_topk(
+            # page_table_1 = forward_batch.hisparse_coordinator.get_front_topk_tokens(
             #     forward_batch.req_pool_indices,
             #     forward_batch.seq_lens,
-            #     topk_indices,
-            #     layer.layer_id,
             # )
+            page_table_1 = forward_batch.hisparse_coordinator.naive_load_topk(
+                forward_batch.req_pool_indices,
+                forward_batch.seq_lens,
+                topk_indices,
+                layer.layer_id,
+            )
         elif envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
         else:

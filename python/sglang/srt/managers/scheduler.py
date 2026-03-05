@@ -1926,6 +1926,7 @@ class Scheduler(
                     self.running_batch = hisparse_batch
                 else:
                     self.running_batch.merge_batch(hisparse_batch)
+                self.running_batch.hisparse_coordinator = self.hisparse_coordinator
         else:
             if self.last_batch and self.last_batch.forward_mode.is_extend():
                 if self.last_batch.chunked_req is not None:
