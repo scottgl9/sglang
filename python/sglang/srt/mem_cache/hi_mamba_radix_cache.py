@@ -752,8 +752,12 @@ class HiMambaRadixCache(MambaRadixCache):
             page_aligned_len = len(key) // self.page_size * self.page_size
             key = key[:page_aligned_len]
 
-        value, best_last_node, best_value_len, deepest_node = self._match_prefix_helper(key)
-        return self._match_post_processor(params, value, best_last_node, best_value_len, deepest_node)
+        value, best_last_node, best_value_len, deepest_node = self._match_prefix_helper(
+            key
+        )
+        return self._match_post_processor(
+            params, value, best_last_node, best_value_len, deepest_node
+        )
 
     def _match_prefix_helper(
         self, key: RadixKey
@@ -849,7 +853,10 @@ class HiMambaRadixCache(MambaRadixCache):
 
         # last_host_backup_node: from deepest_node, find backuped ancestor
         last_host_backup_node = deepest_node
-        while last_host_backup_node is not self.root_node and not last_host_backup_node.backuped:
+        while (
+            last_host_backup_node is not self.root_node
+            and not last_host_backup_node.backuped
+        ):
             last_host_backup_node = last_host_backup_node.parent
 
         mamba_node = best_last_node
