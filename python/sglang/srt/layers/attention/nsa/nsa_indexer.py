@@ -352,7 +352,7 @@ class Indexer(MultiPlatformOp):
         )
 
         _, k_rope = self.rotary_emb(positions, k_rope, k_rope)
-        key[..., : self.rope_head_dim] = k_rope
+        key[..., : self.rope_head_dim] = k_rope.clone()
         key = rotate_activation(key)
 
         return key
