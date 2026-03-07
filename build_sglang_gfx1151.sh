@@ -28,24 +28,40 @@ echo "=== Building SGLang for Strix Halo (gfx1151 -> gfx1100) ==="
 
 # ── Create venv ──────────────────────────────────────────────
 if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating venv at $VENV_DIR (inheriting system site-packages)..."
-    python3 -m venv --system-site-packages "$VENV_DIR"
+    echo "Creating venv at $VENV_DIR (Python 3.12)..."
+    python3.12 -m venv "$VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
 
 # Ensure pip/setuptools are up to date
-pip install --upgrade pip setuptools wheel setuptools_scm
+pip install --upgrade pip setuptools wheel setuptools_scm scikit-build-core
+
+# ── Install PyTorch ROCm ─────────────────────────────────────
+if ! python -c "import torch; assert torch.version.hip" 2>/dev/null; then
+    echo "=== Installing PyTorch ROCm ==="
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3 2>&1 | tail -5
+fi
+python -c "import torch; print(f'PyTorch {torch.__version__}, HIP: {torch.version.hip}')"
 
 # ── Build sgl-kernel ─────────────────────────────────────────
 echo "=== Building sgl-kernel ==="
 cd "$SCRIPT_DIR/sgl-kernel"
-pip install -e . --no-build-isolation 2>&1 | tail -5
+# Use the ROCm pyproject (setuptools-based, not CMake)
+cp pyproject.toml pyproject.toml.bak
+cp pyproject_rocm.toml pyproject.toml
+AMDGPU_TARGET=gfx1100 python setup_rocm.py install 2>&1 | tail -20
+# Restore original pyproject.toml
+mv pyproject.toml.bak pyproject.toml
 echo "sgl-kernel installed."
 
 # ── Install SGLang ───────────────────────────────────────────
 echo "=== Installing SGLang ==="
 cd "$SCRIPT_DIR/python"
+# Use pyproject_other.toml which has the all_hip extra
+cp pyproject.toml pyproject.toml.bak
+cp pyproject_other.toml pyproject.toml
 pip install -e ".[all_hip]" 2>&1 | tail -10
+mv pyproject.toml.bak pyproject.toml
 echo "SGLang installed."
 
 # ── Install AITER (disabled at runtime, available as fallback) ──
