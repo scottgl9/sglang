@@ -109,6 +109,7 @@ class MatchResult(NamedTuple):
     last_host_node: Any
     host_hit_length: int = 0
     mamba_branching_seqlen: Optional[int] = None
+    cache_protected_len: Optional[int] = None
 
 
 class BasePrefixCache(ABC, PrefixCacheTrait):

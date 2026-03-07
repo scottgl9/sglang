@@ -178,6 +178,7 @@ class SessionAwareCache(BasePrefixCache):
             device_indices=device_indices,
             last_device_node=slot.virtual_node,
             last_host_node=slot.virtual_node,
+            cache_protected_len=slot.cache_protected_len,
         )
 
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
