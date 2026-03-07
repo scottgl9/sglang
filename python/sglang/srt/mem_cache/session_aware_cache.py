@@ -231,7 +231,7 @@ class SessionAwareCache(BasePrefixCache):
 
         if slot.req_pool_idx is not None:
             start = slot.cache_protected_len
-            end = ceil_align(slot.kv_allocated_len, self.page_size)
+            end = slot.kv_allocated_len
             if start < end:
                 kv_indices = self.req_to_token_pool.req_to_token[
                     slot.req_pool_idx, start:end
