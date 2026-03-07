@@ -15,6 +15,7 @@ ARG BASE_IMAGE_942="rocm/sgl-dev:rocm7-vllm-20250904"
 ARG BASE_IMAGE_942_ROCM720="rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1"
 ARG BASE_IMAGE_950="rocm/sgl-dev:rocm7-vllm-20250904"
 ARG BASE_IMAGE_950_ROCM720="rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1"
+ARG BASE_IMAGE_1100="rocm/vllm-dev:nightly_main_20260221"
 
 # This is necessary for scope purpose
 ARG GPU_ARCH=gfx950
@@ -28,6 +29,7 @@ ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_PREBUILD_KERNELS="1"
 
 # ===============================
 # Base image 942 with rocm720 and args
@@ -38,6 +40,7 @@ ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_PREBUILD_KERNELS="1"
 
 # ===============================
 # Base image 950 and args
@@ -48,6 +51,7 @@ ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_PREBUILD_KERNELS="1"
 
 # ===============================
 # Base image 950 with rocm720 and args
@@ -58,6 +62,18 @@ ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
 ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_PREBUILD_KERNELS="1"
+
+# ===============================
+# Base image 1100 (RDNA 3/3.5, e.g. Strix Halo gfx1151) and args
+FROM $BASE_IMAGE_1100 AS gfx1100
+ENV BUILD_VLLM="0"
+ENV BUILD_TRITON="0"
+ENV BUILD_LLVM="0"
+ENV BUILD_AITER_ALL="1"
+ENV BUILD_MOONCAKE="0"
+ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_PREBUILD_KERNELS="0"
 
 # ===============================
 # Chosen arch and args
@@ -201,9 +217,9 @@ RUN cd aiter \
      && echo "[AITER] GPU_ARCH=${GPU_ARCH}" \
      && sed -i '/c1 = torch.empty((M, D, S1 + S3), dtype=dtype, device=x.device)/i\    config = dict(config)' aiter/ops/triton/gemm/fused/fused_gemm_afp4wfp4_split_cat.py \
      && if [ "$BUILD_AITER_ALL" = "1" ] && [ "$BUILD_LLVM" = "1" ]; then \
-          sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
+          sh -c "HIP_CLANG_PATH=/sgl-workspace/llvm-project/build/bin/ PREBUILD_KERNELS=$AITER_PREBUILD_KERNELS GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
         elif [ "$BUILD_AITER_ALL" = "1" ]; then \
-          sh -c "PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
+          sh -c "PREBUILD_KERNELS=$AITER_PREBUILD_KERNELS GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
         else \
           sh -c "GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
         fi \
