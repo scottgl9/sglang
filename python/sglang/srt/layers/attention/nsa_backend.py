@@ -1266,22 +1266,8 @@ class NativeSparseAttnBackend(
             else self.nsa_prefill_impl
         )
 
-        if nsa_impl == "trtllm" and not self.use_mha:
-            return self._forward_trtllm(
-                q,
-                k,
-                v,
-                layer,
-                forward_batch,
-                metadata.nsa_cache_seqlens_int32,
-                save_kv_cache,
-                q_rope,
-                k_rope,
-                topk_indices,
-                cos_sin_cache,
-                is_neox,
-                llama_4_scaling,
-            )
+        if nsa_impl == "trtllm":
+            assert self.use_mha, "TRTLLM dsa kernel requires dense MHA as prefill impl"
 
         if k is not None:
             assert v is not None
@@ -2048,6 +2034,10 @@ class NativeSparseAttnBackend(
                 <= forward_batch.get_max_chunk_capacity()  # Fits in chunk
                 and (not is_nsa_enable_prefill_cp())  # CP not enabled
             )
+
+            # TRTLLM sparse MLA kernel requires MHA as prefill impl
+            if self.nsa_prefill_impl == "trtllm" or self.nsa_decode_impl == "trtllm":
+                self.use_mha = True
         else:
             self.use_mha = False  # Decode/verify always use MLA
 
