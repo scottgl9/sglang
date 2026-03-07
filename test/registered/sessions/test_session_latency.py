@@ -420,6 +420,7 @@ class TestStreamingSessionSWA(CustomTestCase):
                 "--enable-streaming-session",
                 "--mem-fraction-static",
                 "0.70",
+                "--disable-piecewise-cuda-graph",
                 "--page-size",
                 "4",
             ],
