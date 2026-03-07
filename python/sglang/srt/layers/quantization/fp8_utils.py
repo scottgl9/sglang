@@ -825,7 +825,7 @@ def triton_mxfp8_blockscaled_linear(
     a_scale_packed = _pack_mxfp8_scales(x_scale_u8)
     b_scale_packed = _pack_mxfp8_scales(weight_scale)
 
-    num_stages = 1 if is_sm120_supported() else (4 if is_sm100_supported() else 1)
+    num_stages = 2 if is_sm120_supported() else (4 if is_sm100_supported() else 1)
     output = mxfp8_block_scaled_matmul_triton(
         q_input,
         a_scale_packed,
