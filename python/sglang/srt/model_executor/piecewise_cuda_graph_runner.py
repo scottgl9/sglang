@@ -273,6 +273,45 @@ class PiecewiseCudaGraphRunner:
         # Set graph pool id globally to be able to use symmetric memory
         set_graph_pool_id(get_global_graph_memory_pool())
 
+        # Pre-warm flashinfer FP4 JIT kernels and cache allow_in_graph-wrapped
+        # function references before torch.compile starts.
+        # TorchDynamo (fullgraph=True) cannot trace into get_fp4_quantization_module
+        # because its body runs build_and_load() → subprocess.run() → threading.Lock()
+        # → _thread.allocate_lock (untraceable C builtin).
+        # _ensure_fp4_fns_cached() loads the JIT module eagerly, then stores
+        # torch._dynamo.allow_in_graph-wrapped refs in module-level globals so
+        # fp4_quantize() and block_scale_interleave() use them directly during
+        # compilation without ever calling get_fp4_quantization_module() again.
+        try:
+            from flashinfer.fp4_quantization import _ensure_fp4_fns_cached
+
+            major, minor = torch.cuda.get_device_capability()
+            arch_key = f"{major}{minor}"
+            _ensure_fp4_fns_cached(arch_key)
+            logger.info(
+                f"Pre-warmed FP4 kernel fns (allow_in_graph) for SM {major}.{minor} "
+                f"(arch_key={arch_key!r}) before torch.compile"
+            )
+        except Exception as e:
+            logger.warning(f"Pre-warm of FP4 kernel fns failed (non-fatal): {e}")
+
+        # Pre-warm KVFP4 quantize/dequantize (@torch.compile) so the first
+        # call during CUDA graph capture doesn't trigger compilation.
+        if self.model_runner.server_args.kv_cache_dtype == "fp4_e2m1":
+            try:
+                from sglang.srt.layers.quantization.kvfp4_tensor import (
+                    KVFP4QuantizeUtil,
+                )
+
+                dummy = torch.randn(1, 1, 16, device="cuda", dtype=torch.bfloat16)
+                q, s = KVFP4QuantizeUtil.batched_quantize(dummy)
+                KVFP4QuantizeUtil.batched_dequantize(q, s)
+                logger.info("Pre-warmed KVFP4 quantize/dequantize kernels")
+            except Exception as e:
+                logger.warning(
+                    f"Pre-warm of KVFP4 kernels failed (non-fatal): {e}"
+                )
+
         with enable_piecewise_cuda_graph():
             language_model = getattr(
                 self.model_runner.model, "language_model", self.model_runner.model
