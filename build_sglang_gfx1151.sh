@@ -39,7 +39,7 @@ pip install --upgrade pip setuptools wheel setuptools_scm scikit-build-core
 # ── Install PyTorch ROCm ─────────────────────────────────────
 if ! python -c "import torch; assert torch.version.hip" 2>/dev/null; then
     echo "=== Installing PyTorch ROCm ==="
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3 2>&1 | tail -5
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm7.0 2>&1 | tail -5
 fi
 python -c "import torch; print(f'PyTorch {torch.__version__}, HIP: {torch.version.hip}')"
 

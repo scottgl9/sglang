@@ -27,11 +27,15 @@ _is_hip = is_hip()
 
 
 if _is_hip:
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
-    from aiter.ops.shuffle import shuffle_weight
+    try:
+        from aiter import ActivationType, QuantType
+        from aiter.fused_moe import fused_moe
+        from aiter.ops.shuffle import shuffle_weight
 
-    ON_GFX950 = "gfx950" in torch.cuda.get_device_properties("cuda").gcnArchName
+        ON_GFX950 = "gfx950" in torch.cuda.get_device_properties("cuda").gcnArchName
+    except (ImportError, RuntimeError):
+        ActivationType = QuantType = fused_moe = shuffle_weight = None
+        ON_GFX950 = False
 
 logger = logging.getLogger(__name__)
 

@@ -10,12 +10,18 @@ from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
 if _is_hip:
-    from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
-        fused_gemm_afp4wfp4_split_cat,
-    )
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
-    from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import gemm_afp4wfp4_pre_quant
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    try:
+        from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
+            fused_gemm_afp4wfp4_split_cat,
+        )
+        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+        from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import gemm_afp4wfp4_pre_quant
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    except ImportError:
+        fused_gemm_afp4wfp4_split_cat = None
+        gemm_afp4wfp4 = None
+        gemm_afp4wfp4_pre_quant = None
+        dynamic_mxfp4_quant = None
 
 
 __all__ = ["QuarkW4A4MXFP4"]
