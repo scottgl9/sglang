@@ -1713,7 +1713,9 @@ class NativeSparseAttnBackend(
         assert (
             indices.shape[-1] == self.nsa_index_topk
         )  # requirement of FlashMLA decode kernel
-
+        print(
+            f"q.shape: {q_all.shape}, kv_cache.shape: {kv_cache.shape}, indices.shape: {indices.shape}"
+        )
         o, _ = flash_mla_with_kvcache(
             q=q_all,
             k_cache=kv_cache,
