@@ -399,5 +399,71 @@ class BenchSessionLatency(CustomTestCase):
             )
 
 
+class TestStreamingSessionSWA(CustomTestCase):
+    """Reproduce: streaming session + SWA model (page_size>1) crashes with
+    AssertionError: cache_protected_len must be page aligned.
+
+    Root cause: SessionAwareCache.match_prefix returns device_indices of length
+    kv_committed_len which is not page-aligned. This flows into
+    req.cache_protected_len, then _evict_swa asserts page alignment.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = "openai/gpt-oss-20b"
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=[
+                "--enable-streaming-session",
+                "--mem-fraction-static",
+                "0.70",
+                "--page-size",
+                "4",
+            ],
+        )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_streaming_session_swa_page_align(self):
+        """Multi-turn streaming session on SWA model should not crash."""
+        num_turns = 5
+        gen_len = 8
+        chunks = _generate_input_chunks(self.tokenizer, num_turns, INPUT_LEN)
+
+        session_id = requests.post(
+            self.base_url + "/open_session",
+            json={"capacity_of_str_len": 4096, "streaming": True},
+        ).json()
+
+        rid = None
+        for chunk_ids in chunks:
+            response = _send_generate(
+                self.base_url,
+                {
+                    "input_ids": chunk_ids,
+                    "session_params": {"id": session_id, "rid": rid},
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_new_tokens": gen_len,
+                        "no_stop_trim": True,
+                        "skip_special_tokens": False,
+                        "ignore_eos": True,
+                    },
+                },
+            )
+            rid = response["meta_info"]["id"]
+
+        requests.post(
+            self.base_url + "/close_session",
+            json={"session_id": session_id},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
