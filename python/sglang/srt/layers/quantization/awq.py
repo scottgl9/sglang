@@ -186,6 +186,20 @@ class AWQConfig(QuantizationConfig):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            from sglang.srt.layers.quantization.moe_wna16 import MoeWNA16Config
+
+            # Reconstruct config dict from AWQConfig fields
+            config = {
+                "quant_method": "awq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "zero_point": self.zero_point,
+                "modules_to_not_convert": self.modules_to_not_convert,
+            }
+            return MoeWNA16Config.from_config(config).get_quant_method(
+                layer, prefix
+            )
         return None
 
 
