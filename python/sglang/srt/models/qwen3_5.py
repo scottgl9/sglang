@@ -74,7 +74,14 @@ from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from sglang.srt.models.utils import WeightsMapper
 
 # Utils
-from sglang.srt.utils import add_prefix, is_cuda, is_npu, make_layers, set_weight_attrs
+from sglang.srt.utils import (
+    LazyValue,
+    add_prefix,
+    is_cuda,
+    is_npu,
+    make_layers,
+    set_weight_attrs,
+)
 from sglang.srt.utils.common import is_sm120_supported
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
@@ -305,6 +312,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
+        is_nextn: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -328,6 +336,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 alt_stream=alt_stream,
                 prefix=add_prefix("mlp", prefix.replace(".linear_attn", "")),
+                is_nextn=is_nextn,
             )
             is_layer_sparse = True
             is_previous_layer_sparse = True
@@ -424,6 +433,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
+        is_nextn: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -526,6 +536,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 alt_stream=alt_stream,
                 prefix=add_prefix("mlp", prefix.replace(".self_attn", "")),
+                is_nextn=is_nextn,
             )
             is_layer_sparse = True
             is_previous_layer_sparse = True
@@ -676,6 +687,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         config: Qwen3_5TextConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        is_nextn: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -709,6 +721,7 @@ class Qwen3_5ForCausalLM(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 alt_stream=alt_stream,
+                is_nextn=is_nextn,
             )
 
         self.layers = make_layers(
@@ -868,6 +881,14 @@ class Qwen3_5ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+    @classmethod
+    def get_model_config_for_expert_location(cls, config):
+        return ModelConfigForExpertLocation(
+            num_layers=config.num_hidden_layers,
+            num_logical_experts=config.num_experts,
+            num_groups=None,
+        )
 
 
 class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
@@ -1474,7 +1495,19 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
         )
 
+        self._routed_experts_weights_of_layer = LazyValue(
+            lambda: {
+                layer_id: layer.mlp.get_moe_weights()
+                for layer_id, layer in enumerate(self.model.layers)
+                if isinstance(layer.mlp, Qwen2MoeSparseMoeBlock)
+            }
+        )
+
         return loaded_params
+
+    @property
+    def routed_experts_weights_of_layer(self):
+        return self._routed_experts_weights_of_layer.value
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
