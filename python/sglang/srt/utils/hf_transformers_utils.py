@@ -207,6 +207,14 @@ def _load_deepseek_v32_model(
 
 
 # Temporary hack for Mistral Large
+def _is_mistral_native_format(model_path: str) -> bool:
+    """Detect Mistral native params.json format (no HF config.json)."""
+    p = Path(model_path)
+    if not p.is_dir():
+        return False
+    return (p / "params.json").exists() and not (p / "config.json").exists()
+
+
 def _load_mistral_large_3_for_causal_LM(
     model_path: str,
     trust_remote_code: bool = False,
@@ -305,7 +313,7 @@ def get_config(
         client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
         model = client.get_local_dir()
 
-    if "mistral-large-3" in str(model).lower():
+    if _is_mistral_native_format(model):
         config = _load_mistral_large_3_for_causal_LM(
             model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
         )
@@ -594,7 +602,7 @@ def get_processor(
 ):
     # pop 'revision' from kwargs if present.
     revision = kwargs.pop("revision", tokenizer_revision)
-    if "mistral-large-3" in str(tokenizer_name).lower():
+    if _is_mistral_native_format(tokenizer_name):
         config = _load_mistral_large_3_for_causal_LM(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
