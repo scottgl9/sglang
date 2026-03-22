@@ -286,6 +286,16 @@ def _load_deepseek_v32_model(
 
 
 # Temporary hack for Mistral Large
+
+
+def _is_mistral_native_format(model_path: str) -> bool:
+    """Detect Mistral native params.json format (no HF config.json)."""
+    p = Path(model_path)
+    if not p.is_dir():
+        return False
+    return (p / "params.json").exists() and not (p / "config.json").exists()
+
+
 @lru_cache(maxsize=2)
 def _load_mistral_large_3_for_causal_LM(
     model_path: str,
@@ -496,11 +506,7 @@ def get_config(
         client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
         model = client.get_local_dir()
 
-    if (
-        "mistral-large-3" in str(model).lower()
-        or "mistral-small-4" in str(model).lower()
-        or "leanstral" in str(model).lower()
-    ):
+    if _is_mistral_native_format(model):
         config = _load_mistral_large_3_for_causal_LM(
             model, trust_remote_code=trust_remote_code, revision=revision
         )
@@ -779,19 +785,48 @@ def get_tokenizer(
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        if not trust_remote_code and (
-            "does not exist or is not currently imported." in str(e)
-            or "requires you to execute the tokenizer file" in str(e)
-        ):
-            err_msg = (
-                "Failed to load the tokenizer. If the tokenizer is a custom "
-                "tokenizer not yet available in the HuggingFace transformers "
-                "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI."
-            )
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
+        if "does not exist or is not currently imported." in str(e):
+            # Mistral native models use tokenizer_class="TokenizersBackend"
+            # which HF can't resolve. Fall back to loading tokenizer.json with
+            # config overridden to use PreTrainedTokenizerFast.
+            tokenizer_json = Path(tokenizer_name) / "tokenizer.json"
+            tokenizer_config = Path(tokenizer_name) / "tokenizer_config.json"
+            if tokenizer_json.is_file():
+                logger.info(
+                    "Unknown tokenizer_class in config; loading tokenizer.json directly."
+                )
+                # Load config to get special tokens, then override tokenizer_class
+                extra_kwargs = {}
+                if tokenizer_config.is_file():
+                    with open(tokenizer_config) as f:
+                        tc = json.load(f)
+                    for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
+                        if key in tc and tc[key] is not None:
+                            extra_kwargs[key] = tc[key]
+                tokenizer = PreTrainedTokenizerFast(
+                    tokenizer_file=str(tokenizer_json), **extra_kwargs
+                )
+            elif not trust_remote_code:
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer is a custom "
+                    "tokenizer not yet available in the HuggingFace transformers "
+                    "library, consider setting `trust_remote_code=True` in LLM "
+                    "or using the `--trust-remote-code` flag in the CLI."
+                )
+                raise RuntimeError(err_msg) from e
+            else:
+                raise e
+        elif "requires you to execute the tokenizer file" in str(e):
+            if not trust_remote_code:
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer is a custom "
+                    "tokenizer not yet available in the HuggingFace transformers "
+                    "library, consider setting `trust_remote_code=True` in LLM "
+                    "or using the `--trust-remote-code` flag in the CLI."
+                )
+                raise RuntimeError(err_msg) from e
+            else:
+                raise e
 
     # Transformers v5 may silently fall back to a generic TokenizersBackend
     # when trust_remote_code=False and the model requires a custom tokenizer.
@@ -1127,11 +1162,7 @@ def get_processor(
 ):
     # pop 'revision' from kwargs if present.
     revision = kwargs.pop("revision", tokenizer_revision)
-    if (
-        "mistral-large-3" in str(tokenizer_name).lower()
-        or "mistral-small-4" in str(tokenizer_name).lower()
-        or "leanstral" in str(tokenizer_name).lower()
-    ):
+    if _is_mistral_native_format(tokenizer_name):
         config = _load_mistral_large_3_for_causal_LM(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
