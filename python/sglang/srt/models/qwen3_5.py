@@ -1089,7 +1089,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
         self.is_mrope_enabled = "mrope_section" in rope_config
 
-        self.deepstack_visual_indexes = self.visual.deepstack_visual_indexes
+        self.deepstack_visual_indexes = (
+            self.visual.deepstack_visual_indexes if self.visual is not None else []
+        )
 
     @property
     def start_layer(self) -> int:
@@ -1106,14 +1108,14 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def get_embed_and_head(self):
         embed = self.model.embed_tokens.weight if self.pp_group.is_first_rank else None
-        head = self.lm_head.weight if self.pp_group.is_last_rank else None
+        head = getattr(self.lm_head, "weight", None) if self.pp_group.is_last_rank else None
         return embed, head
 
     def set_embed_and_head(self, embed, head):
         if self.pp_group.is_first_rank and embed is not None:
             del self.model.embed_tokens.weight
             self.model.embed_tokens.weight = embed
-        if self.pp_group.is_last_rank and head is not None:
+        if self.pp_group.is_last_rank and head is not None and hasattr(self.lm_head, "weight"):
             del self.lm_head.weight
             self.lm_head.weight = head
         torch.cuda.empty_cache()
@@ -1198,18 +1200,20 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
         self.is_mrope_enabled = "mrope_section" in rope_config
 
-        self.deepstack_visual_indexes = self.visual.deepstack_visual_indexes
+        self.deepstack_visual_indexes = (
+            self.visual.deepstack_visual_indexes if self.visual is not None else []
+        )
 
     def get_embed_and_head(self):
         embed = self.model.embed_tokens.weight if self.pp_group.is_first_rank else None
-        head = self.lm_head.weight if self.pp_group.is_last_rank else None
+        head = getattr(self.lm_head, "weight", None) if self.pp_group.is_last_rank else None
         return embed, head
 
     def set_embed_and_head(self, embed, head):
         if self.pp_group.is_first_rank and embed is not None:
             del self.model.embed_tokens.weight
             self.model.embed_tokens.weight = embed
-        if self.pp_group.is_last_rank and head is not None:
+        if self.pp_group.is_last_rank and head is not None and hasattr(self.lm_head, "weight"):
             del self.lm_head.weight
             self.lm_head.weight = head
         torch.cuda.empty_cache()
