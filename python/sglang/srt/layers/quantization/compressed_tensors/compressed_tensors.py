@@ -65,7 +65,7 @@ from sglang.srt.layers.quantization.unquant import (
     UnquantizedFusedMoEMethod,
     UnquantizedLinearMethod,
 )
-from sglang.srt.utils import is_cuda, is_hip, is_npu
+from sglang.srt.utils import get_bool_env_var, is_cuda, is_hip, is_npu
 
 _is_cuda = is_cuda()
 _is_npu = is_npu()
@@ -115,6 +115,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         config: Optional[Dict[str, Any]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
         linear_fp8_config: Optional[Any] = None,
+        lm_head_fp8_config: Optional[Any] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -127,6 +128,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.packed_modules_mapping = packed_modules_mapping or {}
         self.linear_fp8_config = linear_fp8_config
+        self.lm_head_fp8_config = lm_head_fp8_config
 
     def get_linear_method(self) -> CompressedTensorsLinearMethod:
         return CompressedTensorsLinearMethod(self)
@@ -162,8 +164,24 @@ class CompressedTensorsConfig(QuantizationConfig):
         prefix: str,
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
+        from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+
+        # If lm_head_fp8_config is set, apply FP8 to lm_head (ParallelLMHead).
+        # ParallelLMHead extends VocabParallelEmbedding (not LinearBase), so
+        # it must be checked before the LinearBase branch.
+        if (
+            self.lm_head_fp8_config is not None
+            and isinstance(layer, ParallelLMHead)
+            and prefix.endswith("lm_head")
+        ):
+            return Fp8LinearMethod(self.lm_head_fp8_config)
 
         if isinstance(layer, LinearBase):
+            # If lm_head_fp8_config is set, apply FP8 specifically to lm_head.
+            # This intercepts before the ignore-list check so lm_head can be
+            # quantized even when listed in the model's quantization_config.ignore.
+            if self.lm_head_fp8_config is not None and prefix.endswith("lm_head"):
+                return Fp8LinearMethod(self.lm_head_fp8_config)
             # If linear_fp8_config is set, use FP8 for linear layers
             # This allows mixed quantization: experts with int4, linear layers with fp8
             if self.linear_fp8_config is not None:
@@ -239,6 +257,20 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_block_size=fp8_cfg.get("weight_block_size"),
             )
 
+        # If SGLANG_QUANTIZE_LM_HEAD_FP8=1, apply dynamic FP8 to lm_head.
+        lm_head_fp8_config = None
+        if get_bool_env_var("SGLANG_QUANTIZE_LM_HEAD_FP8"):
+            from sglang.srt.layers.quantization.fp8 import Fp8Config
+
+            lm_head_fp8_config = Fp8Config(
+                is_checkpoint_fp8_serialized=False,
+                activation_scheme="dynamic",
+            )
+            logger.info(
+                "SGLANG_QUANTIZE_LM_HEAD_FP8=1: applying dynamic FP8 to lm_head "
+                "(weights quantized at load time, activations per-token dynamic)."
+            )
+
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
@@ -248,6 +280,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config,
             packed_modules_mapping=packed_modules_mapping,
             linear_fp8_config=linear_fp8_config,
+            lm_head_fp8_config=lm_head_fp8_config,
         )
 
     @classmethod
