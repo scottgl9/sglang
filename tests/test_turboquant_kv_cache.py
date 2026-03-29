@@ -803,11 +803,11 @@ class TestSGLangIntegration:
         with open(triton_backend_path) as f:
             source = f.read()
 
-        assert "_is_turboquant_layer" in source, (
-            "triton_backend.py missing _is_turboquant_layer"
+        assert "is_turboquant_layer" in source, (
+            "triton_backend.py missing is_turboquant_layer"
         )
-        assert "_turboquant_apply" in source, (
-            "triton_backend.py missing _turboquant_apply"
+        assert "apply_turboquant_kv_cache" in source, (
+            "triton_backend.py missing apply_turboquant_kv_cache"
         )
 
     def test_flashinfer_backend_turboquant_hooks_exist(self):
@@ -826,8 +826,8 @@ class TestSGLangIntegration:
         with open(flashinfer_backend_path) as f:
             source = f.read()
 
-        assert "_is_turboquant_layer" in source
-        assert "_turboquant_apply" in source
+        assert "is_turboquant_layer" in source
+        assert "apply_turboquant_kv_cache" in source
 
     def test_model_runner_turboquant_branch(self):
         """model_runner.py should handle kv_cache_dtype='turboquant'."""

@@ -43,78 +43,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# TurboQuant KV cache hooks
-# ---------------------------------------------------------------------------
-
-
-def _is_turboquant_layer(layer) -> bool:
-    """Check if a layer has TurboQuant KV cache quantization enabled."""
-    return getattr(layer, "tq_config", None) is not None
-
-
-def _turboquant_apply(layer, k: torch.Tensor, v: torch.Tensor):
-    """Apply TurboQuant encode→decode round-trip to K/V before storing to cache.
-
-    On the first call (not yet calibrated), runs calibration on the current batch.
-    Returns the round-tripped (lossy-compressed) K and V tensors in fp16,
-    ready to be stored into the paged KV cache.
-    """
-    from sglang.srt.layers.quantization.turboquant import (
-        calibrate,
-        turboquant_decode_v2,
-        turboquant_encode_v2,
-    )
-
-    # Lazy calibration on first forward pass
-    if not getattr(layer, "tq_calibrated", False):
-        # Reshape to (tokens, heads, head_dim) for calibration
-        k_cal = k.view(-1, layer.tp_k_head_num, layer.head_dim)
-        v_cal = v.view(-1, layer.tp_v_head_num, layer.head_dim)
-        calibrate(
-            layer,
-            k_cal,
-            v_cal,
-            bits=layer.tq_config.polar_bits,
-            outlier_fraction=layer.tq_config.outlier_fraction,
-        )
-
-    # Move TQ params to the correct device if needed
-    device = k.device
-    if layer.tq_R.device != device:
-        layer.tq_R = layer.tq_R.to(device)
-        layer.tq_R_T = layer.tq_R_T.to(device)
-        layer.tq_outlier_mask = layer.tq_outlier_mask.to(device)
-        layer.tq_codebook_k = layer.tq_codebook_k.to(device)
-        layer.tq_codebook_v = layer.tq_codebook_v.to(device)
-
-    # Reshape to (..., head_dim) for encode/decode
-    orig_k_shape = k.shape
-    orig_v_shape = v.shape
-    k_3d = k.view(-1, layer.tp_k_head_num, layer.head_dim)
-    v_3d = v.view(-1, layer.tp_v_head_num, layer.head_dim)
-
-    # Encode (quantize) then immediately decode (dequantize) — the round-trip
-    # introduces quantization noise but the output is fp16, compatible with
-    # FlashInfer's paged attention kernel.
-    encoded = turboquant_encode_v2(
-        k_3d,
-        v_3d,
-        layer.tq_R,
-        layer.tq_codebook_k,
-        layer.tq_codebook_v,
-        layer.tq_outlier_mask,
-        bits=layer.tq_config.polar_bits,
-        use_qjl=layer.tq_config.use_qjl,
-    )
-    k_out, v_out = turboquant_decode_v2(
-        encoded,
-        layer.tq_R_T,
-        use_qjl=layer.tq_config.use_qjl,
-    )
-
-    return k_out.reshape(orig_k_shape), v_out.reshape(orig_v_shape)
+# Import shared TurboQuant hooks from quantization module
+from sglang.srt.layers.quantization.turboquant import (
+    apply_turboquant_kv_cache,
+    is_turboquant_layer,
+)
 
 if envs.SGLANG_ENABLE_TORCH_COMPILE.get():
     torch._logging.set_logs(dynamo=logging.ERROR)
@@ -853,8 +786,8 @@ class FlashInferAttnBackend(AttentionBackend):
                 assert v is not None
                 if save_kv_cache:
                     k_store, v_store = k, v
-                    if _is_turboquant_layer(layer):
-                        k_store, v_store = _turboquant_apply(layer, k, v)
+                    if is_turboquant_layer(layer):
+                        k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
                     forward_batch.token_to_kv_pool.set_kv_buffer(
                         layer, cache_loc, k_store, v_store, layer.k_scale, layer.v_scale
                     )
@@ -939,8 +872,8 @@ class FlashInferAttnBackend(AttentionBackend):
 
             if save_kv_cache:
                 k_store, v_store = k, v
-                if _is_turboquant_layer(layer):
-                    k_store, v_store = _turboquant_apply(layer, k, v)
+                if is_turboquant_layer(layer):
+                    k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, cache_loc, k_store, v_store, layer.k_scale, layer.v_scale
                 )
@@ -970,8 +903,8 @@ class FlashInferAttnBackend(AttentionBackend):
             assert v is not None
             if save_kv_cache:
                 k_store, v_store = k, v
-                if _is_turboquant_layer(layer):
-                    k_store, v_store = _turboquant_apply(layer, k, v)
+                if is_turboquant_layer(layer):
+                    k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, cache_loc, k_store, v_store, layer.k_scale, layer.v_scale
                 )
