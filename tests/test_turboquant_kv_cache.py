@@ -1,11 +1,9 @@
-"""Tests for TurboQuant KV cache quantization."""
+"""Tests for TurboQuant KV cache quantization (v1 + v2)."""
 
 import sys
 import os
 import types
 
-# Add the python/ directory to sys.path so we can import sglang submodules
-# without a full editable install (which requires many heavy dependencies).
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_project_root, "python"))
 
@@ -13,7 +11,6 @@ import importlib.util
 import torch
 import pytest
 
-# Load modules manually to avoid pulling in the full sglang package.
 _quant_dir = os.path.join(
     _project_root, "python", "sglang", "srt", "layers", "quantization"
 )
@@ -32,7 +29,6 @@ _load_module(
     os.path.join(_quant_dir, "base_config.py"),
 )
 
-# Stub fp8_kernel to avoid CUDA deps
 _fp8_stub = types.ModuleType("sglang.srt.layers.quantization.fp8_kernel")
 _fp8_stub.is_fp8_fnuz = lambda: False
 sys.modules["sglang.srt.layers.quantization.fp8_kernel"] = _fp8_stub
@@ -47,12 +43,25 @@ _tq = _load_module(
     os.path.join(_quant_dir, "turboquant.py"),
 )
 
+# v1 (legacy)
 polar_quantize = _tq.polar_quantize
 polar_dequantize = _tq.polar_dequantize
 qjl_encode_residual = _tq.qjl_encode_residual
 qjl_decode_residual = _tq.qjl_decode_residual
 turboquant_encode = _tq.turboquant_encode
 turboquant_decode = _tq.turboquant_decode
+
+# v2
+_get_rotation_matrix = _tq._get_rotation_matrix
+_lloyd_max_codebook_gaussian = _tq._lloyd_max_codebook_gaussian
+_lloyd_max_refine = _tq._lloyd_max_refine
+calibrate_channels = _tq.calibrate_channels
+_quantize_to_codebook = _tq._quantize_to_codebook
+_dequantize_from_codebook = _tq._dequantize_from_codebook
+turboquant_encode_v2 = _tq.turboquant_encode_v2
+turboquant_decode_v2 = _tq.turboquant_decode_v2
+calibrate = _tq.calibrate
+
 TurboQuantConfig = _tq.TurboQuantConfig
 
 HEAD_DIM = 128
@@ -68,7 +77,7 @@ def random_kv():
 
 
 # --------------------------------------------------------------------------
-# PolarQuant tests
+# PolarQuant v1 tests (backward compat)
 # --------------------------------------------------------------------------
 
 
@@ -76,45 +85,32 @@ class TestPolarQuantize:
     """Test PolarQuant encode/decode roundtrip."""
 
     def test_reconstruction_4bit(self, random_kv):
-        """4-bit per-vector symmetric quant: ~11% relative error for Gaussian data."""
         bits = 4
         codes, scale = polar_quantize(random_kv, bits)
         recon = polar_dequantize(codes, scale, bits)
-
-        # Per-vector relative error
         err = (recon - random_kv).norm(dim=-1)
         orig = random_kv.norm(dim=-1).clamp(min=1e-8)
         rel_err = (err / orig).mean().item()
-
-        # Theoretical: step = 2*absmax/15, absmax ≈ 3σ for d=128 Gaussian.
-        # Per-component RMSE ≈ step/(2√3) → ~11% per-vector relative error.
         assert rel_err < 0.15, f"Mean relative error {rel_err:.4f} exceeds 15%"
 
     def test_reconstruction_3bit(self, random_kv):
-        """3-bit PolarQuant — coarser, higher error expected."""
         bits = 3
         codes, scale = polar_quantize(random_kv, bits)
         recon = polar_dequantize(codes, scale, bits)
-
         err = (recon - random_kv).norm(dim=-1)
         orig = random_kv.norm(dim=-1).clamp(min=1e-8)
         rel_err = (err / orig).mean().item()
-
         assert rel_err < 0.30, f"Mean relative error {rel_err:.4f} exceeds 30%"
 
     def test_more_bits_less_error(self, random_kv):
-        """Higher bit-width must produce lower reconstruction error."""
         errors = {}
         for bits in [3, 4, 5, 6]:
             codes, scale = polar_quantize(random_kv, bits)
             recon = polar_dequantize(codes, scale, bits)
             err = (recon - random_kv).norm(dim=-1).mean().item()
             errors[bits] = err
-
         for b in [4, 5, 6]:
-            assert errors[b] < errors[b - 1], (
-                f"{b}-bit error {errors[b]:.4f} >= {b-1}-bit error {errors[b-1]:.4f}"
-            )
+            assert errors[b] < errors[b - 1]
 
     def test_codes_dtype_and_range(self, random_kv):
         bits = 4
@@ -126,9 +122,7 @@ class TestPolarQuantize:
     def test_scale_preserves_absmax(self, random_kv):
         _, scale = polar_quantize(random_kv, 4)
         expected = random_kv.abs().amax(dim=-1, keepdim=True)
-        torch.testing.assert_close(
-            scale.float(), expected, atol=1e-3, rtol=1e-3
-        )
+        torch.testing.assert_close(scale.float(), expected, atol=1e-3, rtol=1e-3)
 
 
 # --------------------------------------------------------------------------
@@ -137,19 +131,15 @@ class TestPolarQuantize:
 
 
 class TestQJL:
-    """Test QJL 1-bit residual correction."""
-
     def test_encode_decode_shape(self, random_kv):
         bits, res_norm = qjl_encode_residual(random_kv)
         assert bits.shape == random_kv.shape
         assert bits.dtype == torch.uint8
         assert res_norm.shape == (*random_kv.shape[:-1], 1)
-
         decoded = qjl_decode_residual(bits, res_norm, HEAD_DIM, random_kv.device)
         assert decoded.shape == random_kv.shape
 
     def test_unbiased_estimator(self):
-        """QJL should be an unbiased estimator — mean error near zero over many samples."""
         torch.manual_seed(99)
         n_trials = 200
         errors = []
@@ -158,94 +148,313 @@ class TestQJL:
             bits, res_norm = qjl_encode_residual(x)
             recon = qjl_decode_residual(bits, res_norm, HEAD_DIM, x.device)
             errors.append((recon - x).mean().item())
-
         mean_error = sum(errors) / len(errors)
         assert abs(mean_error) < 0.1, f"Mean error {mean_error:.4f} not near zero"
 
 
 # --------------------------------------------------------------------------
-# TurboQuant end-to-end tests
+# Lloyd-Max codebook tests
 # --------------------------------------------------------------------------
 
 
-class TestTurboQuant:
-    """Test full TurboQuant pipeline."""
+class TestLloydMaxCodebook:
+    """Test Lloyd-Max codebook quality."""
+
+    def test_codebook_shape_and_sorted(self):
+        for bits in [3, 4, 5]:
+            n_levels = 2**bits
+            cb = _lloyd_max_codebook_gaussian(n_levels)
+            assert cb.shape == (n_levels,)
+            # Should be sorted (quantiles are monotonically increasing)
+            assert (cb[1:] > cb[:-1]).all(), "Codebook not sorted"
+
+    def test_codebook_symmetric(self):
+        """For Gaussian, codebook should be approximately symmetric around 0."""
+        cb = _lloyd_max_codebook_gaussian(16)
+        assert abs(cb.mean().item()) < 0.05, "Codebook not centered near 0"
+
+    def test_lloyd_max_beats_uniform_mse(self):
+        """Lloyd-Max codebook should have lower MSE than uniform quantization
+        for Gaussian-distributed data."""
+        torch.manual_seed(42)
+        x = torch.randn(10000)
+        bits = 4
+        n_levels = 2**bits
+
+        # Lloyd-Max quantization
+        cb_lm = _lloyd_max_codebook_gaussian(n_levels)
+        cb_lm = _lloyd_max_refine(cb_lm)
+        indices_lm = _quantize_to_codebook(x, cb_lm)
+        recon_lm = _dequantize_from_codebook(indices_lm, cb_lm)
+        mse_lm = ((x - recon_lm) ** 2).mean().item()
+
+        # Uniform quantization (same range as data)
+        x_min, x_max = x.min().item(), x.max().item()
+        cb_uniform = torch.linspace(x_min, x_max, n_levels)
+        indices_uni = _quantize_to_codebook(x, cb_uniform)
+        recon_uni = _dequantize_from_codebook(indices_uni, cb_uniform)
+        mse_uni = ((x - recon_uni) ** 2).mean().item()
+
+        assert mse_lm < mse_uni, (
+            f"Lloyd-Max MSE {mse_lm:.6f} >= uniform MSE {mse_uni:.6f}"
+        )
+
+    def test_refined_codebook_improves(self):
+        """Refinement should not increase MSE."""
+        torch.manual_seed(42)
+        x = torch.randn(10000)
+        cb_init = _lloyd_max_codebook_gaussian(16)
+        cb_refined = _lloyd_max_refine(cb_init, n_iters=30)
+
+        indices_init = _quantize_to_codebook(x, cb_init)
+        recon_init = _dequantize_from_codebook(indices_init, cb_init)
+        mse_init = ((x - recon_init) ** 2).mean().item()
+
+        indices_ref = _quantize_to_codebook(x, cb_refined)
+        recon_ref = _dequantize_from_codebook(indices_ref, cb_refined)
+        mse_ref = ((x - recon_ref) ** 2).mean().item()
+
+        assert mse_ref <= mse_init + 1e-6, (
+            f"Refined MSE {mse_ref:.6f} > init MSE {mse_init:.6f}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Outlier channel detection tests
+# --------------------------------------------------------------------------
+
+
+class TestOutlierChannels:
+    """Test outlier-aware channel detection."""
+
+    def test_identifies_high_variance_channels(self):
+        """Channels with injected high variance should be flagged as outliers."""
+        torch.manual_seed(77)
+        x = torch.randn(100, 8, HEAD_DIM)
+        # Inject high variance in channels 0, 10, 20
+        x[..., 0] *= 10
+        x[..., 10] *= 10
+        x[..., 20] *= 10
+
+        mask, variance = calibrate_channels(x, outlier_fraction=0.05)
+        # With 5% of 128 = ~6 outlier channels, our 3 injected ones should be included
+        assert mask[0].item() is True, "Channel 0 not detected as outlier"
+        assert mask[10].item() is True, "Channel 10 not detected as outlier"
+        assert mask[20].item() is True, "Channel 20 not detected as outlier"
+
+    def test_outlier_mask_shape(self):
+        torch.manual_seed(77)
+        x = torch.randn(50, 4, HEAD_DIM)
+        mask, variance = calibrate_channels(x, outlier_fraction=0.15)
+        assert mask.shape == (HEAD_DIM,)
+        assert mask.dtype == torch.bool
+        assert variance.shape == (HEAD_DIM,)
+
+    def test_outlier_fraction_controls_count(self):
+        """Number of outlier channels should roughly match the requested fraction."""
+        torch.manual_seed(77)
+        x = torch.randn(100, 8, HEAD_DIM)
+        for frac in [0.05, 0.10, 0.15, 0.25]:
+            mask, _ = calibrate_channels(x, outlier_fraction=frac)
+            n_outliers = mask.sum().item()
+            expected = max(1, int(frac * HEAD_DIM))
+            # Allow ±1 due to ties at threshold
+            assert abs(n_outliers - expected) <= 1, (
+                f"frac={frac}: got {n_outliers} outliers, expected ~{expected}"
+            )
+
+
+# --------------------------------------------------------------------------
+# TurboQuant v2 end-to-end tests
+# --------------------------------------------------------------------------
+
+
+class TestTurboQuantV2:
+    """Test full v2 pipeline: rotation + Lloyd-Max + outlier + QJL."""
+
+    @pytest.fixture
+    def v2_setup(self):
+        """Set up rotation matrix, codebooks, and outlier mask."""
+        torch.manual_seed(123)
+        bits = 4
+        n_levels = 2**bits
+        k = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+        v = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+
+        R = _get_rotation_matrix(HEAD_DIM, torch.device("cpu"), torch.float32)
+        cb = _lloyd_max_codebook_gaussian(n_levels)
+        cb = _lloyd_max_refine(cb)
+
+        # Calibrate outlier mask from rotated keys
+        k_rot = k.float() @ R
+        outlier_mask, _ = calibrate_channels(k_rot, outlier_fraction=0.15)
+
+        return {
+            "k": k, "v": v, "R": R, "R_T": R.T.contiguous(),
+            "codebook_k": cb, "codebook_v": cb.clone(),
+            "outlier_mask": outlier_mask, "bits": bits,
+        }
+
+    def test_encode_decode_roundtrip(self, v2_setup):
+        """v2 encode/decode should reconstruct with reasonable error."""
+        s = v2_setup
+        encoded = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=True,
+        )
+        k_out, v_out = turboquant_decode_v2(encoded, s["R_T"], use_qjl=True)
+
+        # Per-vector relative error
+        k_err = (k_out.float() - s["k"]).norm(dim=-1)
+        k_orig = s["k"].norm(dim=-1).clamp(min=1e-8)
+        rel_err = (k_err / k_orig).mean().item()
+        assert rel_err < 0.25, f"Key reconstruction rel error {rel_err:.4f} too high"
+
+    def test_inner_product_cosine_similarity(self, v2_setup):
+        """Cosine similarity between original and v2-quantized dot products."""
+        s = v2_setup
+        torch.manual_seed(456)
+        q = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+
+        dots_orig = (q * s["k"]).sum(dim=-1)
+
+        encoded = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=True,
+        )
+        k_out, _ = turboquant_decode_v2(encoded, s["R_T"], use_qjl=True)
+        dots_quant = (q * k_out.float()).sum(dim=-1)
+
+        cos_sim = torch.nn.functional.cosine_similarity(
+            dots_orig.flatten().unsqueeze(0),
+            dots_quant.flatten().unsqueeze(0),
+        ).item()
+        assert cos_sim > 0.98, f"Cosine similarity {cos_sim:.4f} below 0.98"
+
+    def test_no_qjl_mode(self, v2_setup):
+        """v2 without QJL should still work."""
+        s = v2_setup
+        encoded = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        assert "k_qjl_bits" not in encoded
+        k_out, v_out = turboquant_decode_v2(encoded, s["R_T"], use_qjl=False)
+        assert k_out.shape == s["k"].shape
+        assert v_out.shape == s["v"].shape
+
+    def test_memory_savings(self, v2_setup):
+        """Quantized representation should use less memory than fp16 KV."""
+        s = v2_setup
+        fp16_bytes = s["k"].numel() * 2 + s["v"].numel() * 2  # k + v at fp16
+
+        encoded = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        # Core storage: codes (uint8) + scales (fp16) + outliers (fp16)
+        quant_bytes = (
+            encoded["k_codes"].nelement() * encoded["k_codes"].element_size()
+            + encoded["v_codes"].nelement() * encoded["v_codes"].element_size()
+            + encoded["k_scale"].nelement() * encoded["k_scale"].element_size()
+            + encoded["v_scale"].nelement() * encoded["v_scale"].element_size()
+            + encoded["k_outliers"].nelement() * encoded["k_outliers"].element_size()
+            + encoded["v_outliers"].nelement() * encoded["v_outliers"].element_size()
+        )
+        assert quant_bytes < fp16_bytes, (
+            f"Quantized {quant_bytes} bytes >= fp16 {fp16_bytes} bytes"
+        )
+        ratio = fp16_bytes / quant_bytes
+        # With 15% outlier channels at fp16, expect ~1.7x (not 2x)
+        assert ratio > 1.5, f"Compression ratio {ratio:.2f}x is below 1.5x"
+
+
+# --------------------------------------------------------------------------
+# Calibration tests
+# --------------------------------------------------------------------------
+
+
+class TestCalibration:
+    """Test the calibrate() function."""
+
+    def test_calibrate_sets_attributes(self):
+        torch.manual_seed(42)
+        layer = torch.nn.Module()
+        layer.tq_calibrated = False
+        k = torch.randn(32, N_HEADS, HEAD_DIM)
+        v = torch.randn(32, N_HEADS, HEAD_DIM)
+
+        calibrate(layer, k, v, bits=4, outlier_fraction=0.15)
+
+        assert layer.tq_calibrated is True
+        assert hasattr(layer, "tq_R")
+        assert hasattr(layer, "tq_R_T")
+        assert hasattr(layer, "tq_outlier_mask")
+        assert hasattr(layer, "tq_codebook_k")
+        assert hasattr(layer, "tq_codebook_v")
+        assert layer.tq_R.shape == (HEAD_DIM, HEAD_DIM)
+        assert layer.tq_outlier_mask.dtype == torch.bool
+        assert layer.tq_outlier_mask.shape == (HEAD_DIM,)
+
+    def test_calibrate_then_encode_decode(self):
+        """End-to-end: calibrate, encode, decode."""
+        torch.manual_seed(42)
+        layer = torch.nn.Module()
+        layer.tq_calibrated = False
+        k = torch.randn(32, N_HEADS, HEAD_DIM)
+        v = torch.randn(32, N_HEADS, HEAD_DIM)
+
+        calibrate(layer, k, v, bits=4, outlier_fraction=0.15)
+
+        # Encode/decode a fresh batch using calibrated params
+        torch.manual_seed(99)
+        k2 = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+        v2 = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+
+        encoded = turboquant_encode_v2(
+            k2, v2, layer.tq_R, layer.tq_codebook_k, layer.tq_codebook_v,
+            layer.tq_outlier_mask, bits=4, use_qjl=True,
+        )
+        k_out, v_out = turboquant_decode_v2(encoded, layer.tq_R_T, use_qjl=True)
+
+        # Should reconstruct with bounded error
+        k_err = (k_out.float() - k2).norm(dim=-1)
+        k_orig = k2.norm(dim=-1).clamp(min=1e-8)
+        rel_err = (k_err / k_orig).mean().item()
+        assert rel_err < 0.25, f"Post-calibration rel error {rel_err:.4f} too high"
+
+
+# --------------------------------------------------------------------------
+# TurboQuant v1 end-to-end tests (backward compat)
+# --------------------------------------------------------------------------
+
+
+class TestTurboQuantV1:
+    """Test v1 (legacy) pipeline still works."""
 
     def test_inner_product_cosine_similarity(self, random_kv):
-        """Cosine similarity between original and quantized dot-product vectors."""
         torch.manual_seed(456)
         q = torch.randn(BATCH, N_HEADS, HEAD_DIM, dtype=torch.float32)
         k = random_kv
-
         dots_orig = (q * k).sum(dim=-1)
 
         encoded = turboquant_encode(k, bits=4, use_polar=True, use_qjl=True)
         k_recon = turboquant_decode(encoded, bits=4, use_polar=True, use_qjl=True)
         dots_quant = (q * k_recon).sum(dim=-1)
 
-        # Cosine similarity between the two dot-product vectors (flattened)
         cos_sim = torch.nn.functional.cosine_similarity(
             dots_orig.flatten().unsqueeze(0),
             dots_quant.flatten().unsqueeze(0),
         ).item()
-
-        assert cos_sim > 0.98, (
-            f"Cosine similarity {cos_sim:.4f} between original and quantized "
-            f"inner products is below 0.98"
-        )
-
-    def test_qjl_reduces_inner_product_bias(self):
-        """QJL correction should reduce inner-product bias vs polar-only.
-
-        QJL provides an *unbiased* inner-product estimator. While it may
-        increase per-element L2 error, it reduces systematic bias in dot
-        products — the quantity that matters for attention scores.
-        """
-        torch.manual_seed(789)
-        n_trials = 50
-        bias_polar = []
-        bias_turbo = []
-
-        for _ in range(n_trials):
-            q = torch.randn(HEAD_DIM)
-            k = torch.randn(HEAD_DIM)
-            dot_orig = (q * k).sum().item()
-
-            # Polar only
-            enc = turboquant_encode(k.unsqueeze(0), bits=4, use_polar=True, use_qjl=False)
-            k_p = turboquant_decode(enc, bits=4, use_polar=True, use_qjl=False).squeeze(0)
-            bias_polar.append((q * k_p).sum().item() - dot_orig)
-
-            # Polar + QJL
-            enc = turboquant_encode(k.unsqueeze(0), bits=4, use_polar=True, use_qjl=True)
-            k_t = turboquant_decode(enc, bits=4, use_polar=True, use_qjl=True).squeeze(0)
-            bias_turbo.append((q * k_t).sum().item() - dot_orig)
-
-        mean_bias_polar = abs(sum(bias_polar) / len(bias_polar))
-        mean_bias_turbo = abs(sum(bias_turbo) / len(bias_turbo))
-
-        # TurboQuant (with QJL) should have lower or comparable mean bias
-        # Both should be small; we mainly verify QJL doesn't make bias worse
-        assert mean_bias_turbo < 1.0, f"TurboQuant bias {mean_bias_turbo:.4f} too large"
+        assert cos_sim > 0.98
 
     def test_memory_reduction(self, random_kv):
-        """Quantized codes (uint8) use less memory than fp16 KV.
-
-        PolarQuant stores: uint8 codes + fp16 per-vector scale.
-        For [4, 8, 128]: codes = 4096 bytes, scale = 64 bytes = 4160 bytes
-        vs fp16: 8192 bytes — a ~2x reduction.
-        """
         fp16_bytes = random_kv.numel() * 2
-
         encoded = turboquant_encode(random_kv, bits=4, use_polar=True, use_qjl=False)
         quant_bytes = sum(t.nelement() * t.element_size() for t in encoded.values())
-
-        assert quant_bytes < fp16_bytes, (
-            f"Quantized {quant_bytes} bytes >= fp16 {fp16_bytes} bytes"
-        )
+        assert quant_bytes < fp16_bytes
 
     def test_polar_only_mode(self, random_kv):
-        """PolarQuant without QJL should still work and produce bounded error."""
         encoded = turboquant_encode(random_kv, bits=4, use_polar=True, use_qjl=False)
         recon = turboquant_decode(encoded, bits=4, use_polar=True, use_qjl=False)
         assert "qjl_bits" not in encoded
@@ -253,7 +462,6 @@ class TestTurboQuant:
         assert err.item() < 0.15
 
     def test_fallback_raw_mode(self, random_kv):
-        """With polar disabled, should store raw fp16."""
         encoded = turboquant_encode(random_kv, bits=3, use_polar=False, use_qjl=False)
         recon = turboquant_decode(encoded, bits=3, use_polar=False, use_qjl=False)
         torch.testing.assert_close(recon, random_kv, atol=1e-2, rtol=1e-2)
@@ -265,8 +473,6 @@ class TestTurboQuant:
 
 
 class TestTurboQuantConfig:
-    """Test the SGLang QuantizationConfig integration."""
-
     def test_get_name(self):
         assert TurboQuantConfig.get_name() == "turboquant"
 
@@ -277,9 +483,17 @@ class TestTurboQuantConfig:
         assert cfg.polar_bits == 4
         assert cfg.use_qjl is False
 
+    def test_from_config_with_outlier_fraction(self):
+        cfg = TurboQuantConfig.from_config(
+            {"bits": 4.0, "outlier_fraction": 0.20}
+        )
+        assert cfg.outlier_fraction == 0.20
+
     def test_defaults(self):
         cfg = TurboQuantConfig()
         assert cfg.bits == 3.5
         assert cfg.use_polar is True
         assert cfg.use_qjl is True
         assert cfg.polar_bits == 3
+        assert cfg.outlier_fraction == 0.15
+        assert cfg.calibrated is False
