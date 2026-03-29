@@ -576,7 +576,23 @@ def apply_turboquant_kv_cache(layer, k: torch.Tensor, v: torch.Tensor):
     On the first call (not yet calibrated), runs calibration on the current batch.
     Returns the round-tripped (lossy-compressed) K and V tensors in fp16,
     ready to be stored into the paged KV cache.
+
+    NOTE: This function uses boolean indexing which is incompatible with CUDA graph
+    capture. It skips quantization during CUDA graph capture and only applies during
+    normal (non-captured) inference. Calibration is also skipped during capture.
     """
+    # Skip during CUDA graph capture — boolean indexing is not capturable
+    try:
+        from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
+        if is_in_piecewise_cuda_graph():
+            return k, v
+    except ImportError:
+        pass
+
+    # Check if we're inside a CUDA graph capture context via torch
+    if torch.cuda.is_current_stream_capturing():
+        return k, v
+
     # Lazy calibration on first forward pass
     if not getattr(layer, "tq_calibrated", False):
         # Reshape to (tokens, heads, head_dim) for calibration
