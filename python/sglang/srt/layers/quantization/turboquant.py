@@ -559,3 +559,67 @@ except ImportError:
     turboquant_decode_triton = None  # type: ignore[assignment]
 
 HAS_TRITON_KERNELS = _HAS_TRITON_KERNELS
+
+
+# ---------------------------------------------------------------------------
+# Shared KV cache hooks (used by attention backends)
+# ---------------------------------------------------------------------------
+
+def is_turboquant_layer(layer) -> bool:
+    """Check if a layer has TurboQuant KV cache quantization enabled."""
+    return getattr(layer, "tq_config", None) is not None
+
+
+def apply_turboquant_kv_cache(layer, k: torch.Tensor, v: torch.Tensor):
+    """Apply TurboQuant encode→decode round-trip to K/V before storing to cache.
+    
+    On the first call (not yet calibrated), runs calibration on the current batch.
+    Returns the round-tripped (lossy-compressed) K and V tensors in fp16,
+    ready to be stored into the paged KV cache.
+    """
+    # Lazy calibration on first forward pass
+    if not getattr(layer, "tq_calibrated", False):
+        # Reshape to (tokens, heads, head_dim) for calibration
+        k_cal = k.view(-1, layer.tp_k_head_num, layer.head_dim)
+        v_cal = v.view(-1, layer.tp_v_head_num, layer.head_dim)
+        calibrate(
+            layer,
+            k_cal,
+            v_cal,
+            bits=layer.tq_config.polar_bits,
+            outlier_fraction=layer.tq_config.outlier_fraction,
+        )
+    
+    # Move TQ params to the correct device if needed
+    device = k.device
+    if layer.tq_R.device != device:
+        layer.tq_R = layer.tq_R.to(device)
+        layer.tq_R_T = layer.tq_R_T.to(device)
+        layer.tq_outlier_mask = layer.tq_outlier_mask.to(device)
+        layer.tq_codebook_k = layer.tq_codebook_k.to(device)
+        layer.tq_codebook_v = layer.tq_codebook_v.to(device)
+    
+    # Reshape to (..., head_dim) for encode/decode
+    orig_k_shape = k.shape
+    orig_v_shape = v.shape
+    k_3d = k.view(-1, layer.tp_k_head_num, layer.head_dim)
+    v_3d = v.view(-1, layer.tp_v_head_num, layer.head_dim)
+    
+    # Encode (quantize) then immediately decode (dequantize)
+    encoded = turboquant_encode_v2(
+        k_3d,
+        v_3d,
+        layer.tq_R,
+        layer.tq_codebook_k,
+        layer.tq_codebook_v,
+        layer.tq_outlier_mask,
+        bits=layer.tq_config.polar_bits,
+        use_qjl=layer.tq_config.use_qjl,
+    )
+    k_out, v_out = turboquant_decode_v2(
+        encoded,
+        layer.tq_R_T,
+        use_qjl=layer.tq_config.use_qjl,
+    )
+    
+    return k_out.reshape(orig_k_shape), v_out.reshape(orig_v_shape)
