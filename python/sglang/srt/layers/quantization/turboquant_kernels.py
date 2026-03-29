@@ -31,7 +31,6 @@ if HAS_TRITON:
         # Inputs
         input_ptr,
         R_ptr,
-        codebook_ptr,
         outlier_mask_ptr,
         # Outputs
         codes_ptr,
@@ -46,129 +45,74 @@ if HAS_TRITON:
         D: tl.constexpr,  # head_dim
         n_normal: tl.constexpr,  # number of non-outlier channels
         n_outlier: tl.constexpr,  # number of outlier channels
-        N_LEVELS: tl.constexpr,  # codebook size
+        N_LEVELS: tl.constexpr,  # codebook size (e.g. 16)
         BLOCK_D: tl.constexpr,
     ):
-        """Fused: matrix multiply by R, compute per-vector scale, quantize to uint8.
+        """Fused: rotation via tl.dot, per-vector scale, uniform quantize to uint8.
 
         Each program handles one (batch*head) row.
+        Uses tl.dot for blocked matrix multiply instead of scalar loops.
+        Quantization uses uniform rounding which approximates Lloyd-Max well
+        post-rotation (Gaussian assumption holds after orthogonal transform).
         """
         row_idx = tl.program_id(0)
+        offs = tl.arange(0, BLOCK_D)
+        mask = offs < D
 
-        # Load input vector [D]
-        offs_d = tl.arange(0, BLOCK_D)
-        mask_d = offs_d < D
-        x = tl.load(input_ptr + row_idx * stride_input_row + offs_d, mask=mask_d, other=0.0)
+        # Load x as [1, BLOCK_D] for tl.dot
+        x = tl.load(
+            input_ptr + row_idx * stride_input_row + offs, mask=mask, other=0.0
+        ).to(tl.float32)
+        x_2d = tl.reshape(x, [1, BLOCK_D])
 
-        # Rotate: x_rot = x @ R  (row-vector times matrix)
-        # We compute each output element as dot(x, R[:, j])
-        # For simplicity with Triton, we iterate over output dimensions
-        # and accumulate. But since D is typically 128, we can do a
-        # blocked matmul approach.
-        # Store rotated values in registers
-        x_rot = tl.zeros([BLOCK_D], dtype=tl.float32)
-        for j in range(D):
-            # R[offs_d, j] — column j of R
-            r_col = tl.load(R_ptr + offs_d * stride_R_row + j, mask=mask_d, other=0.0)
-            dot_val = tl.sum(x * r_col)
-            # We need x_rot[j] = dot(x, R[:, j])
-            # But we can't easily do scatter in Triton like this.
-            # Instead, let's compute x_rot as full matmul differently.
-            pass
+        # Load full rotation matrix R [BLOCK_D, BLOCK_D]
+        R_offs = offs[:, None] * stride_R_row + offs[None, :]
+        R_mask = (offs[:, None] < D) & (offs[None, :] < D)
+        R_block = tl.load(R_ptr + R_offs, mask=R_mask, other=0.0).to(tl.float32)
 
-        # Alternative approach: compute x_rot[j] = sum_i x[i] * R[i, j] for each j
-        # We process each output element
-        for j in range(D):
-            r_col = tl.load(R_ptr + offs_d * stride_R_row + j, mask=mask_d, other=0.0)
-            val = tl.sum(x * r_col)
+        # x_rot = x @ R via tl.dot — single blocked matmul
+        x_rot_2d = tl.dot(x_2d, R_block)  # [1, BLOCK_D]
+        x_rot = tl.reshape(x_rot_2d, [BLOCK_D])
 
-            # Check if channel j is an outlier
-            is_outlier = tl.load(outlier_mask_ptr + j)
+        # Load outlier mask
+        outlier_mask = tl.load(outlier_mask_ptr + offs, mask=mask, other=0).to(tl.int1)
+        normal_mask = ~outlier_mask & mask
 
-            if is_outlier:
-                # Store as float16 in outlier buffer
-                # Need to figure out outlier index — count outliers before j
-                # For simplicity, we store at a pre-computed position
-                pass
-            else:
-                pass
-
-        # Due to the complexity of scatter-based indexing in Triton,
-        # we use a simpler two-pass approach:
-
-        # Pass 1: Compute all rotated values and store to a temp buffer
-        # Actually, let's compute the full rotated vector by loading R row by row
-        # x_rot[j] = sum_i x[i] * R[i][j]
-        # This is equivalent to: for each j, dot product of x with column j of R
-
-        # We'll store results to codes/outlier directly
-
-        # Compute rotated vector into local array
-        # We need a different approach — compute per output element
-
-        # Actually the clean Triton way: each program computes one row's worth
-        # of output. We accumulate x_rot as a [BLOCK_D] vector.
-
-        # x_rot = x @ R where x is [D] and R is [D, D]
-        # x_rot[j] = sum_i x[i] * R[i, j]
-        # Equivalent to loading row i of R^T: R^T[j, :] and dotting with x
-
-        # Let's just do it element by element for the output
-        # and split into normal/outlier channels
-
-        normal_idx = 0
-        outlier_idx = 0
-
-        # Compute absmax scale over normal channels (two-pass: first compute rotated normals)
-        # We'll store rotated values temporarily
-        abs_max = 0.0
-
-        # First pass: compute rotated values, find absmax of normal channels
-        for j in range(D):
-            # Load R^T row j = R column j
-            r_col = tl.load(R_ptr + offs_d * stride_R_row + j, mask=mask_d, other=0.0)
-            val = tl.sum(x * r_col)
-            is_outlier = tl.load(outlier_mask_ptr + j)
-
-            if not is_outlier:
-                abs_val = tl.abs(val)
-                abs_max = tl.maximum(abs_max, abs_val)
-
-        # Clamp scale
-        scale = tl.maximum(abs_max, 1e-8)
+        # Compute absmax scale over normal channels only
+        abs_normal = tl.where(normal_mask, tl.abs(x_rot), 0.0)
+        scale = tl.max(abs_normal, axis=0)
+        scale = tl.maximum(scale, 1e-8)
         tl.store(scale_ptr + row_idx, scale.to(tl.float16))
 
-        # Second pass: quantize normal channels, store outliers
-        normal_idx_counter = 0
-        outlier_idx_counter = 0
-        for j in range(D):
-            r_col = tl.load(R_ptr + offs_d * stride_R_row + j, mask=mask_d, other=0.0)
-            val = tl.sum(x * r_col)
-            is_outlier = tl.load(outlier_mask_ptr + j)
+        # Uniform quantization: code = clamp(round((x_norm/scale + 1)/2 * (N-1)), 0, N-1)
+        # This approximates Lloyd-Max well post-rotation since distribution is ~Gaussian
+        normalized = x_rot / scale
+        codes_float = (normalized + 1.0) * 0.5 * (N_LEVELS - 1)
+        # libdevice.round is not always available; use floor(x + 0.5) for rounding
+        codes_int = tl.math.floor(codes_float + 0.5).to(tl.int32)
+        codes_int = tl.minimum(tl.maximum(codes_int, 0), N_LEVELS - 1)
 
-            if is_outlier:
-                tl.store(
-                    outlier_ptr + row_idx * stride_outlier_row + outlier_idx_counter,
-                    val.to(tl.float16),
-                )
-                outlier_idx_counter += 1
-            else:
-                # Normalize and quantize via nearest codebook entry
-                normalized = val / scale
-                # Find nearest codebook entry
-                best_idx = 0
-                best_dist = tl.abs(normalized - tl.load(codebook_ptr + 0))
-                for c in range(1, N_LEVELS):
-                    cb_val = tl.load(codebook_ptr + c)
-                    dist = tl.abs(normalized - cb_val)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_idx = c
-                tl.store(
-                    codes_ptr + row_idx * stride_codes_row + normal_idx_counter,
-                    best_idx.to(tl.uint8),
-                )
-                normal_idx_counter += 1
+        # Scatter normal channels into codes output using cumsum for compact indexing
+        # normal_positions[j] = number of normal channels before j (exclusive prefix sum)
+        normal_int = tl.where(normal_mask, 1, 0)
+        normal_cumsum = tl.cumsum(normal_int, axis=0) - 1  # 0-based index
+
+        # Store normal codes compactly
+        tl.store(
+            codes_ptr + row_idx * stride_codes_row + normal_cumsum,
+            codes_int.to(tl.uint8),
+            mask=normal_mask,
+        )
+
+        # Scatter outlier channels into outlier output
+        outlier_int = tl.where(outlier_mask & mask, 1, 0)
+        outlier_cumsum = tl.cumsum(outlier_int, axis=0) - 1
+
+        tl.store(
+            outlier_ptr + row_idx * stride_outlier_row + outlier_cumsum,
+            x_rot.to(tl.float16),
+            mask=outlier_mask & mask,
+        )
 
     @triton.jit
     def _turboquant_decode_kernel(
@@ -176,9 +120,11 @@ if HAS_TRITON:
         codes_ptr,
         scale_ptr,
         outlier_ptr,
-        codebook_ptr,
         outlier_mask_ptr,
         R_T_ptr,
+        # QJL inputs (ignored if has_qjl is False)
+        qjl_bits_ptr,
+        qjl_norm_ptr,
         # Output
         output_ptr,
         # Strides
@@ -186,55 +132,92 @@ if HAS_TRITON:
         stride_outlier_row,
         stride_RT_row,
         stride_output_row,
+        stride_qjl_bits_row,
         # Params
         D: tl.constexpr,
         n_normal: tl.constexpr,
         n_outlier: tl.constexpr,
+        N_LEVELS: tl.constexpr,
+        has_qjl: tl.constexpr,
         BLOCK_D: tl.constexpr,
     ):
-        """Dequantize + merge outliers + unrotate.
+        """Dequantize + QJL correction + merge outliers + unrotate via tl.dot.
 
         Each program handles one (batch*head) row.
         """
         row_idx = tl.program_id(0)
+        offs = tl.arange(0, BLOCK_D)
+        mask = offs < D
 
-        # Load scale for this row
+        # Load scale
         scale = tl.load(scale_ptr + row_idx).to(tl.float32)
 
-        # Reconstruct the rotated vector [D] by merging normal (dequantized) and outlier channels
-        # We'll compute the unrotated output element by element:
-        # output[i] = sum_j rotated[j] * R_T[j, i]
-        # where rotated[j] is either dequantized or outlier depending on mask
+        # Load outlier mask and build compact indices
+        outlier_mask = tl.load(outlier_mask_ptr + offs, mask=mask, other=0).to(tl.int1)
+        normal_mask = ~outlier_mask & mask
 
-        offs_d = tl.arange(0, BLOCK_D)
-        mask_d = offs_d < D
+        normal_int = tl.where(normal_mask, 1, 0)
+        normal_cumsum = tl.cumsum(normal_int, axis=0) - 1
 
-        # For each output element i, compute dot product of rotated vector with R_T column i
-        for i in range(D):
-            acc = 0.0
-            normal_idx = 0
-            outlier_idx = 0
+        outlier_int = tl.where(outlier_mask & mask, 1, 0)
+        outlier_cumsum = tl.cumsum(outlier_int, axis=0) - 1
 
-            for j in range(D):
-                is_outlier = tl.load(outlier_mask_ptr + j)
-                rt_val = tl.load(R_T_ptr + j * stride_RT_row + i)
+        # Load and dequantize normal codes: uniform inverse
+        # code -> value: val = (code / (N-1)) * 2 - 1 then * scale
+        raw_codes = tl.load(
+            codes_ptr + row_idx * stride_codes_row + normal_cumsum,
+            mask=normal_mask,
+            other=0,
+        ).to(tl.float32)
+        dequant_normal = (raw_codes / (N_LEVELS - 1) * 2.0 - 1.0) * scale
 
-                if is_outlier:
-                    val = tl.load(
-                        outlier_ptr + row_idx * stride_outlier_row + outlier_idx
-                    ).to(tl.float32)
-                    outlier_idx += 1
-                else:
-                    code = tl.load(
-                        codes_ptr + row_idx * stride_codes_row + normal_idx
-                    ).to(tl.int32)
-                    cb_val = tl.load(codebook_ptr + code)
-                    val = cb_val * scale
-                    normal_idx += 1
+        # QJL residual correction on normal channels
+        if has_qjl:
+            # Load sign bits (uint8, one per normal channel)
+            sign_raw = tl.load(
+                qjl_bits_ptr + row_idx * stride_qjl_bits_row + normal_cumsum,
+                mask=normal_mask,
+                other=0,
+            ).to(tl.float32)
+            signs = sign_raw * 2.0 - 1.0  # {0,1} -> {-1,+1}
 
-                acc += val * rt_val
+            # Load residual norm for this row
+            res_norm = tl.load(qjl_norm_ptr + row_idx).to(tl.float32)
 
-            tl.store(output_ptr + row_idx * stride_output_row + i, acc.to(tl.float16))
+            # QJL correction: (||r|| * sqrt(pi/2) / n_normal) * sign
+            # pi/2 ≈ 1.5707963
+            correction = signs * (res_norm * 1.2533141 / n_normal)  # sqrt(pi/2) ≈ 1.2533141
+            dequant_normal = dequant_normal + correction
+
+        # Load outlier values
+        outlier_vals = tl.load(
+            outlier_ptr + row_idx * stride_outlier_row + outlier_cumsum,
+            mask=outlier_mask & mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        # Merge into full rotated vector [BLOCK_D]
+        rotated = tl.zeros([BLOCK_D], dtype=tl.float32)
+        rotated = tl.where(normal_mask, dequant_normal, rotated)
+        rotated = tl.where(outlier_mask & mask, outlier_vals, rotated)
+
+        # Unrotate: output = rotated @ R_T via tl.dot
+        rotated_2d = tl.reshape(rotated, [1, BLOCK_D])
+
+        R_T_offs = offs[:, None] * stride_RT_row + offs[None, :]
+        R_T_mask = (offs[:, None] < D) & (offs[None, :] < D)
+        R_T_block = tl.load(R_T_ptr + R_T_offs, mask=R_T_mask, other=0.0).to(
+            tl.float32
+        )
+
+        out_2d = tl.dot(rotated_2d, R_T_block)  # [1, BLOCK_D]
+        out = tl.reshape(out_2d, [BLOCK_D])
+
+        tl.store(
+            output_ptr + row_idx * stride_output_row + offs,
+            out.to(tl.float16),
+            mask=mask,
+        )
 
 
 def turboquant_encode_triton(
@@ -255,11 +238,7 @@ def turboquant_encode_triton(
             k, v, R, codebook_k, codebook_v, outlier_mask, bits=bits, use_qjl=use_qjl
         )
 
-    # For now, the Triton kernel handles the core rotation + quantization.
-    # QJL residual correction is still done in PyTorch since it's not the bottleneck.
-    # The Triton kernel operates on flattened (batch*heads, head_dim) tensors.
-
-    batch_shape = k.shape[:-1]  # everything except head_dim
+    batch_shape = k.shape[:-1]
     D = k.shape[-1]
     n_outlier = outlier_mask.sum().item()
     n_normal = D - n_outlier
@@ -270,6 +249,10 @@ def turboquant_encode_triton(
     result["codebook_k"] = codebook_k
     result["codebook_v"] = codebook_v
 
+    BLOCK_D = 1
+    while BLOCK_D < D:
+        BLOCK_D *= 2
+
     for name, x, codebook in [("k", k, codebook_k), ("v", v, codebook_v)]:
         x_flat = x.reshape(-1, D).float().contiguous()
         n_rows = x_flat.shape[0]
@@ -279,20 +262,12 @@ def turboquant_encode_triton(
         outliers = torch.empty(n_rows, n_outlier, dtype=torch.float16, device=x.device)
 
         R_cont = R.float().contiguous()
-        cb_cont = codebook.float().contiguous().to(x.device)
         om_cont = outlier_mask.to(x.device).contiguous()
-
-        BLOCK_D = max(D, 128)  # Must be >= D
-        # Ensure BLOCK_D is power of 2 for Triton
-        BLOCK_D = 1
-        while BLOCK_D < D:
-            BLOCK_D *= 2
 
         grid = (n_rows,)
         _turboquant_encode_kernel[grid](
             x_flat,
             R_cont,
-            cb_cont,
             om_cont,
             codes,
             scale,
@@ -314,21 +289,19 @@ def turboquant_encode_triton(
         result[f"{name}_scale"] = scale.reshape(*batch_shape, 1)
         result[f"{name}_outliers"] = outliers.reshape(*batch_shape, n_outlier)
 
-    # QJL residual correction (still in PyTorch — not perf-critical)
+    # QJL residual correction (still in PyTorch for encode — sign bits require
+    # a random projection that doesn't benefit from Triton fusion)
     if use_qjl:
-        from sglang.srt.layers.quantization.turboquant import (
-            _dequantize_from_codebook,
-            qjl_encode_residual,
-        )
+        from sglang.srt.layers.quantization.turboquant import qjl_encode_residual
 
         normal_mask = ~outlier_mask
         for name, x, codebook in [("k", k, codebook_k), ("v", v, codebook_v)]:
             x_rot = (x.float() @ R.float()).to(x.dtype)
             x_normal = x_rot[..., normal_mask]
+            # Dequantize using uniform inverse (matches kernel quantization)
             recon_normal = (
-                _dequantize_from_codebook(result[f"{name}_codes"], codebook)
-                * result[f"{name}_scale"].float()
-            )
+                result[f"{name}_codes"].float() / (n_levels - 1) * 2.0 - 1.0
+            ) * result[f"{name}_scale"].float()
             residual = x_normal.float() - recon_normal
             qjl_bits, qjl_norm = qjl_encode_residual(residual)
             result[f"{name}_qjl_bits"] = qjl_bits
@@ -349,10 +322,19 @@ def turboquant_decode_triton(
         return turboquant_decode_v2(encoded, R_T, use_qjl=use_qjl)
 
     outlier_mask = encoded["outlier_mask"]
-    normal_mask = ~outlier_mask
     D = outlier_mask.shape[0]
     n_outlier = outlier_mask.sum().item()
     n_normal = D - n_outlier
+
+    # Infer N_LEVELS from codebook size
+    n_levels = encoded["codebook_k"].shape[0]
+
+    BLOCK_D = 1
+    while BLOCK_D < D:
+        BLOCK_D *= 2
+
+    R_T_cont = R_T.float().contiguous()
+    om_cont = outlier_mask.to(R_T.device).contiguous()
 
     results = []
     for name in ["k", "v"]:
@@ -360,71 +342,51 @@ def turboquant_decode_triton(
         batch_shape = codes.shape[:-1]
         scale = encoded[f"{name}_scale"]
         outliers = encoded[f"{name}_outliers"]
-        codebook = encoded[f"codebook_{name}"]
 
-        # Apply QJL correction before unrotation
-        if use_qjl and f"{name}_qjl_bits" in encoded:
-            from sglang.srt.layers.quantization.turboquant import (
-                _dequantize_from_codebook,
-                qjl_decode_residual,
-            )
+        codes_flat = codes.reshape(-1, n_normal).contiguous()
+        n_rows = codes_flat.shape[0]
+        scale_flat = scale.reshape(-1).contiguous()
+        outliers_flat = outliers.reshape(-1, n_outlier).contiguous()
 
-            recon_normal = (
-                _dequantize_from_codebook(codes, codebook) * scale.float()
-            )
-            res = qjl_decode_residual(
-                encoded[f"{name}_qjl_bits"],
-                encoded[f"{name}_qjl_norm"],
-                n_normal,
-                codes.device,
-            )
-            recon_normal = recon_normal + res
+        output = torch.empty(n_rows, D, dtype=torch.float16, device=codes.device)
 
-            # Rebuild full rotated vector and unrotate in PyTorch
-            # (QJL path modifies the normal channels, so we can't use pure Triton decode)
-            full = torch.zeros(*batch_shape, D, dtype=torch.float32, device=codes.device)
-            full[..., normal_mask] = recon_normal.float()
-            full[..., outlier_mask] = outliers.float()
-            out = (full @ R_T.float()).to(torch.float16)
-            results.append(out)
+        has_qjl = use_qjl and f"{name}_qjl_bits" in encoded
+
+        # QJL tensors (provide dummy pointers if not used)
+        if has_qjl:
+            qjl_bits = encoded[f"{name}_qjl_bits"].reshape(-1, n_normal).contiguous()
+            qjl_norm = encoded[f"{name}_qjl_norm"].reshape(-1).contiguous()
+            stride_qjl_bits_row = qjl_bits.stride(0)
         else:
-            # Pure Triton decode path (no QJL)
-            codes_flat = codes.reshape(-1, n_normal).contiguous()
-            n_rows = codes_flat.shape[0]
-            scale_flat = scale.reshape(-1).contiguous()
-            outliers_flat = outliers.reshape(-1, n_outlier).contiguous()
+            qjl_bits = codes_flat  # dummy, won't be read
+            qjl_norm = scale_flat  # dummy, won't be read
+            stride_qjl_bits_row = 0
 
-            output = torch.empty(n_rows, D, dtype=torch.float16, device=codes.device)
+        grid = (n_rows,)
+        _turboquant_decode_kernel[grid](
+            codes_flat,
+            scale_flat,
+            outliers_flat,
+            om_cont,
+            R_T_cont,
+            qjl_bits,
+            qjl_norm,
+            output,
+            # Strides
+            codes_flat.stride(0),
+            outliers_flat.stride(0),
+            R_T_cont.stride(0),
+            output.stride(0),
+            stride_qjl_bits_row,
+            # Params
+            D=D,
+            n_normal=n_normal,
+            n_outlier=n_outlier,
+            N_LEVELS=n_levels,
+            has_qjl=has_qjl,
+            BLOCK_D=BLOCK_D,
+        )
 
-            R_T_cont = R_T.float().contiguous()
-            cb_cont = codebook.float().contiguous().to(codes.device)
-            om_cont = outlier_mask.to(codes.device).contiguous()
-
-            BLOCK_D = 1
-            while BLOCK_D < D:
-                BLOCK_D *= 2
-
-            grid = (n_rows,)
-            _turboquant_decode_kernel[grid](
-                codes_flat,
-                scale_flat,
-                outliers_flat,
-                cb_cont,
-                om_cont,
-                R_T_cont,
-                output,
-                # Strides
-                codes_flat.stride(0),
-                outliers_flat.stride(0),
-                R_T_cont.stride(0),
-                output.stride(0),
-                # Params
-                D=D,
-                n_normal=n_normal,
-                n_outlier=n_outlier,
-                BLOCK_D=BLOCK_D,
-            )
-
-            results.append(output.reshape(*batch_shape, D))
+        results.append(output.reshape(*batch_shape, D))
 
     return results[0], results[1]
