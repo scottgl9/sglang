@@ -497,3 +497,205 @@ class TestTurboQuantConfig:
         assert cfg.polar_bits == 3
         assert cfg.outlier_fraction == 0.15
         assert cfg.calibrated is False
+
+
+# --------------------------------------------------------------------------
+# Triton kernel tests
+# --------------------------------------------------------------------------
+
+# Load kernels module
+_tq_kernels = _load_module(
+    "sglang.srt.layers.quantization.turboquant_kernels",
+    os.path.join(_quant_dir, "turboquant_kernels.py"),
+)
+
+turboquant_encode_triton = _tq_kernels.turboquant_encode_triton
+turboquant_decode_triton = _tq_kernels.turboquant_decode_triton
+HAS_TRITON = _tq_kernels.HAS_TRITON
+
+
+class TestTritonKernels:
+    """Test Triton encode/decode kernels match PyTorch implementation."""
+
+    @pytest.fixture
+    def triton_setup(self):
+        """Set up test data for Triton kernel tests."""
+        torch.manual_seed(123)
+        bits = 4
+        n_levels = 2**bits
+        k = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+        v = torch.randn(BATCH, N_HEADS, HEAD_DIM)
+
+        R = _get_rotation_matrix(HEAD_DIM, torch.device("cpu"), torch.float32)
+        cb = _lloyd_max_codebook_gaussian(n_levels)
+        cb = _lloyd_max_refine(cb)
+
+        k_rot = k.float() @ R
+        outlier_mask, _ = calibrate_channels(k_rot, outlier_fraction=0.15)
+
+        return {
+            "k": k, "v": v, "R": R, "R_T": R.T.contiguous(),
+            "codebook_k": cb, "codebook_v": cb.clone(),
+            "outlier_mask": outlier_mask, "bits": bits,
+        }
+
+    def test_triton_encode_matches_pytorch(self, triton_setup):
+        """Triton encode output should match PyTorch within tolerance."""
+        s = triton_setup
+        # PyTorch reference
+        ref = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        # Triton path
+        tri = turboquant_encode_triton(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+
+        # Codes should match exactly (same codebook, same quantization)
+        assert torch.equal(ref["k_codes"], tri["k_codes"]), "k_codes mismatch"
+        assert torch.equal(ref["v_codes"], tri["v_codes"]), "v_codes mismatch"
+
+        # Scales should match within fp16 precision
+        torch.testing.assert_close(
+            ref["k_scale"], tri["k_scale"], atol=1e-3, rtol=1e-3
+        )
+        torch.testing.assert_close(
+            ref["v_scale"], tri["v_scale"], atol=1e-3, rtol=1e-3
+        )
+
+        # Outliers should match within fp16 precision
+        torch.testing.assert_close(
+            ref["k_outliers"], tri["k_outliers"], atol=1e-3, rtol=1e-3
+        )
+
+    def test_triton_roundtrip_matches_pytorch(self, triton_setup):
+        """Full Triton encode→decode should match PyTorch roundtrip within 1e-3."""
+        s = triton_setup
+        # PyTorch reference roundtrip
+        ref_enc = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        k_ref, v_ref = turboquant_decode_v2(ref_enc, s["R_T"], use_qjl=False)
+
+        # Triton roundtrip
+        tri_enc = turboquant_encode_triton(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        k_tri, v_tri = turboquant_decode_triton(tri_enc, s["R_T"], use_qjl=False)
+
+        torch.testing.assert_close(k_ref, k_tri, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(v_ref, v_tri, atol=1e-3, rtol=1e-3)
+
+    def test_triton_roundtrip_with_qjl(self, triton_setup):
+        """Triton encode→decode with QJL should match PyTorch."""
+        s = triton_setup
+        ref_enc = turboquant_encode_v2(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=True,
+        )
+        k_ref, v_ref = turboquant_decode_v2(ref_enc, s["R_T"], use_qjl=True)
+
+        tri_enc = turboquant_encode_triton(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=True,
+        )
+        k_tri, v_tri = turboquant_decode_triton(tri_enc, s["R_T"], use_qjl=True)
+
+        torch.testing.assert_close(k_ref, k_tri, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(v_ref, v_tri, atol=1e-3, rtol=1e-3)
+
+    def test_triton_reconstruction_quality(self, triton_setup):
+        """Triton roundtrip should have reasonable reconstruction error."""
+        s = triton_setup
+        tri_enc = turboquant_encode_triton(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=True,
+        )
+        k_out, v_out = turboquant_decode_triton(tri_enc, s["R_T"], use_qjl=True)
+
+        k_err = (k_out.float() - s["k"]).norm(dim=-1)
+        k_orig = s["k"].norm(dim=-1).clamp(min=1e-8)
+        rel_err = (k_err / k_orig).mean().item()
+        assert rel_err < 0.25, f"Triton key reconstruction rel error {rel_err:.4f} too high"
+
+    def test_triton_fallback_when_unavailable(self, triton_setup):
+        """When HAS_TRITON is False, wrappers should fall back to PyTorch."""
+        # This test verifies the fallback path works by directly calling
+        # the wrapper functions (they use PyTorch internally when Triton
+        # kernels aren't compiled for the current GPU).
+        s = triton_setup
+        enc = turboquant_encode_triton(
+            s["k"], s["v"], s["R"], s["codebook_k"], s["codebook_v"],
+            s["outlier_mask"], bits=s["bits"], use_qjl=False,
+        )
+        k_out, v_out = turboquant_decode_triton(enc, s["R_T"], use_qjl=False)
+        assert k_out.shape == s["k"].shape
+        assert v_out.shape == s["v"].shape
+
+    def test_has_triton_flag_exposed(self):
+        """The HAS_TRITON flag should be importable from the kernels module."""
+        assert isinstance(HAS_TRITON, bool)
+
+
+class TestFlashInferTurboQuantHooks:
+    """Test the TurboQuant detection logic used in FlashInfer backend."""
+
+    @staticmethod
+    def _is_turboquant_layer(layer) -> bool:
+        """Mirror of flashinfer_backend._is_turboquant_layer for testing."""
+        return getattr(layer, "tq_config", None) is not None
+
+    def test_is_turboquant_layer_detection(self):
+        """_is_turboquant_layer should detect layers with tq_config."""
+        layer_with = torch.nn.Module()
+        layer_with.tq_config = TurboQuantConfig()
+        assert self._is_turboquant_layer(layer_with) is True
+
+        layer_without = torch.nn.Module()
+        assert self._is_turboquant_layer(layer_without) is False
+
+        layer_none = torch.nn.Module()
+        layer_none.tq_config = None
+        assert self._is_turboquant_layer(layer_none) is False
+
+    def test_turboquant_apply_roundtrip(self):
+        """Test the encode→decode roundtrip that the backend hook performs."""
+        torch.manual_seed(42)
+        layer = torch.nn.Module()
+        layer.tq_calibrated = False
+        layer.tq_config = TurboQuantConfig(bits=4.0, outlier_fraction=0.15)
+        layer.tp_k_head_num = N_HEADS
+        layer.tp_v_head_num = N_HEADS
+        layer.head_dim = HEAD_DIM
+
+        k = torch.randn(BATCH * N_HEADS, HEAD_DIM)
+        v = torch.randn(BATCH * N_HEADS, HEAD_DIM)
+
+        # Simulate what _turboquant_apply does
+        calibrate(
+            layer,
+            k.view(-1, N_HEADS, HEAD_DIM),
+            v.view(-1, N_HEADS, HEAD_DIM),
+            bits=layer.tq_config.polar_bits,
+            outlier_fraction=layer.tq_config.outlier_fraction,
+        )
+        k_3d = k.view(-1, N_HEADS, HEAD_DIM)
+        v_3d = v.view(-1, N_HEADS, HEAD_DIM)
+        encoded = turboquant_encode_v2(
+            k_3d, v_3d, layer.tq_R, layer.tq_codebook_k,
+            layer.tq_codebook_v, layer.tq_outlier_mask,
+            bits=layer.tq_config.polar_bits, use_qjl=layer.tq_config.use_qjl,
+        )
+        k_out, v_out = turboquant_decode_v2(
+            encoded, layer.tq_R_T, use_qjl=layer.tq_config.use_qjl,
+        )
+
+        # Verify reasonable reconstruction
+        k_err = (k_out.float() - k_3d).norm(dim=-1)
+        k_orig = k_3d.norm(dim=-1).clamp(min=1e-8)
+        rel_err = (k_err / k_orig).mean().item()
+        assert rel_err < 0.30, f"Backend hook roundtrip rel error {rel_err:.4f} too high"

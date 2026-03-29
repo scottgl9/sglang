@@ -7,7 +7,7 @@ Faithful to the vLLM PR #38280 approach:
   3. Outlier-aware channel allocation (high-variance channels stay at bf16)
   4. QJL 1-bit residual correction on the quantization residual
 
-Pure PyTorch implementation — no custom CUDA/Triton kernels.
+Pure PyTorch implementation with optional Triton-accelerated kernels.
 """
 
 import logging
@@ -541,3 +541,21 @@ class TurboQuantKVCacheMethod(BaseKVCacheMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         layer.tq_initialized = True
+
+
+# ---------------------------------------------------------------------------
+# Triton-accelerated encode/decode (optional, falls back to PyTorch)
+# ---------------------------------------------------------------------------
+
+try:
+    from sglang.srt.layers.quantization.turboquant_kernels import (
+        HAS_TRITON as _HAS_TRITON_KERNELS,
+        turboquant_decode_triton,
+        turboquant_encode_triton,
+    )
+except ImportError:
+    _HAS_TRITON_KERNELS = False
+    turboquant_encode_triton = None  # type: ignore[assignment]
+    turboquant_decode_triton = None  # type: ignore[assignment]
+
+HAS_TRITON_KERNELS = _HAS_TRITON_KERNELS
