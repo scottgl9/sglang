@@ -1205,7 +1205,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if name not in params_dict:
-                    logger.warning(f"Parameter {name} not found in params_dict")
+                    if not ("visual" in name and self.visual is None):
+                        logger.warning(f"Parameter {name} not found in params_dict")
                     continue
                 param = params_dict[name]
 
@@ -1233,6 +1234,15 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         apply_fp8_post_quant_linear_base(
             self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
         )
+
+        # Post-quantize vision encoder BF16 linear layers to FP8 (~860MB → ~430MB)
+        # Targets VisionAttention (qkv_proj, proj) and Qwen3_VisionMLP (linear_fc1/fc2)
+        # in all 27 blocks plus PatchMerger. Scoped to self.visual to avoid collisions.
+        if self.visual is not None:
+            apply_fp8_post_quant_linear_base(
+                self.visual,
+                layer_patterns=["qkv_proj", "proj", "linear_fc1", "linear_fc2"],
+            )
 
         return loaded_params
 
@@ -1474,6 +1484,8 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
+                    elif "visual" in name and self.visual is None:
+                        pass  # language_only=True: visual module not created, skip silently
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
             loaded_params.add(name)
@@ -1503,6 +1515,15 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         apply_fp8_post_quant_linear_base(
             self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
         )
+
+        # Post-quantize vision encoder BF16 linear layers to FP8 (~860MB → ~430MB)
+        # Targets VisionAttention (qkv_proj, proj) and Qwen3_VisionMLP (linear_fc1/fc2)
+        # in all 27 blocks plus PatchMerger. Scoped to self.visual to avoid collisions.
+        if self.visual is not None:
+            apply_fp8_post_quant_linear_base(
+                self.visual,
+                layer_patterns=["qkv_proj", "proj", "linear_fc1", "linear_fc2"],
+            )
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {

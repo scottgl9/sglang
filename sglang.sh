@@ -5,7 +5,7 @@
 #   build [--skip-*]               Build SGLang into .sglang/ venv (run once)
 #   launch [args]                  Start the OpenAI-compatible API server (raw args)
 #   shell                          Drop into an activated venv shell
-#   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4 + speculative decoding
+#   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4 + vision (FP8) + speculative decoding
 #   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4 + speculative decoding
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
@@ -525,9 +525,9 @@ cmd_qwen35_nvfp4() {
             --mamba-scheduler-strategy extra_buffer
         )
         export SGLANG_ENABLE_SPEC_V2=1
-        info "Preset: Qwen3.5-122B-A10B-NVFP4 (compressed-tensors, speculative NEXTN)"
+        info "Preset: Qwen3.5-122B-A10B-NVFP4 (compressed-tensors, speculative NEXTN, vision FP8)"
     else
-        info "Preset: Qwen3.5-122B-A10B-NVFP4 (compressed-tensors, MTP DISABLED)"
+        info "Preset: Qwen3.5-122B-A10B-NVFP4 (compressed-tensors, MTP DISABLED, vision FP8)"
     fi
     info "  Model : ${model}"
     info "  CtxLen: ${CONTEXT_LENGTH}"
@@ -545,7 +545,6 @@ cmd_qwen35_nvfp4() {
         --chunked-prefill-size 16384 \
         --mamba-full-memory-ratio auto \
         --disable-piecewise-cuda-graph \
-        --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
         --trust-remote-code \
@@ -793,7 +792,7 @@ Commands:
   launch [sglang args]           Start the OpenAI-compatible API server
   shell                          Drop into an activated venv shell
 
-  Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4, speculative decoding
+  Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4 + vision (FP8), speculative decoding
   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4, speculative decoding
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
