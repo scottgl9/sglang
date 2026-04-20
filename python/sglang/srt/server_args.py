@@ -3857,7 +3857,7 @@ class ServerArgs:
             type=str,
             default=ServerArgs.kv_cache_dtype,
             choices=["auto", "fp8_e5m2", "fp8_e4m3", "bf16", "bfloat16", "fp4_e2m1", "turboquant"],
-            help='Data type for kv cache storage. "auto" will use model data type. "bf16" or "bfloat16" for BF16 KV cache. "fp8_e5m2" and "fp8_e4m3" are supported for CUDA 11.8+. "fp4_e2m1" (only mxfp4) is supported for CUDA 12.8+ and PyTorch 2.8.0+. "turboquant" uses Lloyd-Max vector quantization with outlier-aware channel allocation.',
+            help='Data type for kv cache storage. "auto" will use model data type. "bf16" or "bfloat16" for BF16 KV cache. "fp8_e5m2" and "fp8_e4m3" are supported for CUDA 11.8+. "fp4_e2m1" (only mxfp4) is supported for CUDA 12.8+ and PyTorch 2.8.0+. "turboquant" uses Lloyd-Max vector quantization with outlier-aware channel allocation (MHA backends only: flashinfer, triton, fa3/flashattention, trtllm_mha, dual_chunk_flash_attn, torch_native, torch_flex; MLA and ROCm/XPU backends are not supported).',
         )
         parser.add_argument(
             "--enable-fp32-lm-head",

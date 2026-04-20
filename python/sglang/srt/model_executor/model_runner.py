@@ -1906,6 +1906,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             # controlled quantization noise.  The actual compression metadata
             # (codebooks, rotation matrix, outlier mask) lives on each attention
             # layer and is managed by TurboQuantKVCacheMethod.
+            self._check_turboquant_backend_supported()
             self.kv_cache_dtype = self.dtype
             self.turboquant_kv_cache = True
             self._apply_turboquant_to_layers()
@@ -1915,6 +1916,39 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
         log_info_on_rank0(logger, f"Using KV cache dtype: {self.kv_cache_dtype}")
+
+    # Attention backends with turboquant `set_kv_buffer` hooks wired in.
+    _TURBOQUANT_SUPPORTED_BACKENDS = frozenset(
+        {
+            "flashinfer",
+            "triton",
+            "fa3",
+            "flashattention",
+            "trtllm_mha",
+            "dual_chunk_flash_attn",
+            "torch_native",
+            "torch_flex",
+        }
+    )
+
+    def _check_turboquant_backend_supported(self):
+        """Reject `--kv-cache-dtype turboquant` on backends lacking the hook.
+
+        MLA backends use `set_mla_kv_buffer` (a separate code path) and are not
+        yet wired. ROCm/XPU/NPU backends and double-sparsity also lack hooks.
+        Fail fast with a clear message instead of silently storing unquantized
+        K/V while TurboQuant metadata claims otherwise.
+        """
+        backend = getattr(self.server_args, "attention_backend", None)
+        if backend is None or backend in self._TURBOQUANT_SUPPORTED_BACKENDS:
+            return
+        raise NotImplementedError(
+            f"TurboQuant KV cache is not supported on attention backend "
+            f"{backend!r}. Supported backends: "
+            f"{sorted(self._TURBOQUANT_SUPPORTED_BACKENDS)}. MLA backends "
+            f"(flashinfer_mla, flashmla, cutlass_mla, trtllm_mla, nsa) use a "
+            f"separate KV buffer API and are not yet wired."
+        )
 
     def _apply_turboquant_to_layers(self):
         """Apply TurboQuantConfig to all RadixAttention layers.
