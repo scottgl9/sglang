@@ -10,6 +10,10 @@ import triton.language as tl
 
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.quantization.turboquant import (
+    apply_turboquant_kv_cache,
+    is_turboquant_layer,
+)
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.layers.utils.cp_utils import (
     cp_allgather_and_save_kv_cache,
@@ -766,8 +770,11 @@ class FlashAttentionBackend(AttentionBackend):
                     else forward_batch.encoder_out_cache_loc
                 )
                 if not self.use_mla:
+                    k_store, v_store = k, v
+                    if is_turboquant_layer(layer):
+                        k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
                     forward_batch.token_to_kv_pool.set_kv_buffer(
-                        layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                        layer, cache_loc, k_store, v_store, layer.k_scale, layer.v_scale
                     )
                 else:
                     forward_batch.token_to_kv_pool.set_mla_kv_buffer(
@@ -1147,8 +1154,11 @@ class FlashAttentionBackend(AttentionBackend):
                     else forward_batch.encoder_out_cache_loc
                 )
                 if not self.use_mla:
+                    k_store, v_store = k, v
+                    if is_turboquant_layer(layer):
+                        k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
                     forward_batch.token_to_kv_pool.set_kv_buffer(
-                        layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                        layer, cache_loc, k_store, v_store, layer.k_scale, layer.v_scale
                     )
                 else:
                     forward_batch.token_to_kv_pool.set_mla_kv_buffer(

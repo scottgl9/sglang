@@ -6,6 +6,10 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.quantization.turboquant import (
+    apply_turboquant_kv_cache,
+    is_turboquant_layer,
+)
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
@@ -209,7 +213,10 @@ class TorchNativeAttnBackend(AttentionBackend):
             cache_loc = forward_batch.out_cache_loc
 
         if save_kv_cache:
-            forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
+            k_store, v_store = k, v
+            if is_turboquant_layer(layer):
+                k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
+            forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k_store, v_store)
 
         use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
 
@@ -260,7 +267,10 @@ class TorchNativeAttnBackend(AttentionBackend):
             cache_loc = forward_batch.out_cache_loc
 
         if save_kv_cache:
-            forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
+            k_store, v_store = k, v
+            if is_turboquant_layer(layer):
+                k_store, v_store = apply_turboquant_kv_cache(layer, k, v)
+            forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k_store, v_store)
 
         use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
 

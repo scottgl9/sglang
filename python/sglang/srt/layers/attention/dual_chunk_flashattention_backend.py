@@ -19,6 +19,10 @@ from sgl_kernel.sparse_flash_attn import (
 from sglang.srt.distributed.parallel_state import get_tensor_model_parallel_rank
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.flashattention_backend import FlashAttentionMetadata
+from sglang.srt.layers.quantization.turboquant import (
+    apply_turboquant_kv_cache,
+    is_turboquant_layer,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
 if TYPE_CHECKING:
@@ -355,11 +359,14 @@ class DualChunkFlashAttentionBackend(AttentionBackend):
 
         if key is not None and value is not None:
             if save_kv_cache:
+                k_store, v_store = key, value
+                if is_turboquant_layer(layer):
+                    k_store, v_store = apply_turboquant_kv_cache(layer, key, value)
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer,
                     forward_batch.out_cache_loc,
-                    key,
-                    value,
+                    k_store,
+                    v_store,
                     layer.k_scale,
                     layer.v_scale,
                 )
@@ -451,11 +458,14 @@ class DualChunkFlashAttentionBackend(AttentionBackend):
 
         if key is not None and value is not None:
             if save_kv_cache:
+                k_store, v_store = key, value
+                if is_turboquant_layer(layer):
+                    k_store, v_store = apply_turboquant_kv_cache(layer, key, value)
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer,
                     forward_batch.out_cache_loc,
-                    key,
-                    value,
+                    k_store,
+                    v_store,
                     layer.k_scale,
                     layer.v_scale,
                 )
