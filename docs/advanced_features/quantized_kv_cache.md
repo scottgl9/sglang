@@ -31,6 +31,30 @@ FP4 quantization is currently experimental.
 
 - **E2M1** (1 sign bit, 2 exponent bits, 1 mantissa bit): Uses block-based microscaling where tensors are divided into blocks of consecutive elements, with each block sharing a single 8-bit exponential scaling factor. While OCP specifies blocks of 32 elements, SGLang's current implementation uses blocks of 16 elements for KV cache quantization.
 
+### TurboQuant (Lloyd-Max + rotation + QJL)
+
+```{warning}
+TurboQuant is experimental. MHA backends only — not supported on MLA, ROCm (AITER/Wave), Intel XPU/AMX, or NPU backends.
+```
+
+TurboQuant is a vector-quantization KV cache scheme based on [vLLM PR #38280](https://github.com/vllm-project/vllm/pull/38280). Rather than per-element FP8/FP4 scaling, it:
+
+- Rotates K/V with a learned orthogonal matrix so coordinates become near-isotropic.
+- Splits channels into an **outlier set** (kept in higher precision) and a **main set** (vector-quantized via a Lloyd–Max codebook).
+- Uses **QJL** (Johnson–Lindenstrauss) sketches as optional 1-bit residual correction.
+
+Unlike FP8/FP4, TurboQuant stores the cache in the model's native dtype (BF16/FP16). Quantization is applied as a lossy encode→decode round-trip before every pool write; the codebook/rotation/outlier mask live on each `RadixAttention` layer. Calibration runs opportunistically on the first forward pass.
+
+```bash
+# TurboQuant with FlashInfer (recommended MHA backend)
+python3 -m sglang.launch_server \
+    --model-path meta-llama/Llama-3.2-1B \
+    --attention-backend flashinfer \
+    --kv-cache-dtype turboquant
+```
+
+**Supported attention backends:** `flashinfer`, `triton`, `fa3` / `flashattention`, `trtllm_mha`, `dual_chunk_flash_attn`, `torch_native`, `torch_flex`. Launching with an unsupported backend (e.g. any MLA backend, `aiter`, `wave`, `xpu`, `intel_amx`, `double_sparsity`) raises `NotImplementedError` at startup.
+
 ## Usage
 
 ### Enabling Quantized KV Cache

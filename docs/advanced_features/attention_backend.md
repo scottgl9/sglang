@@ -15,34 +15,36 @@ The support matrix is split into two parts: MHA (standard attention) and MLA (mu
 
 ### MHA Backends
 
-| **Backend**                     | **Page Size > 1 (native)** | **FP8 KV Cache** | **FP4 KV Cache** | **Spec topk=1** | **Spec topk>1** | **Sliding Window** | **MultiModal** |
-|---------------------------------|-----------------------------|------------------|-----------------|-----------------|-----------------|--------------------|----------------|
-| **FlashInfer**                  | ✅                          | ✅               | ❌              | ✅              | ✅              | ✅                 | ❌             |
-| **FA3 (FlashAttention 3)**      | ✅                          | ✅               | ❌              | ✅              | ✅              | ✅                 | ✅             |
-| **FA4 (FlashAttention 4)**      | 128                         | ❌               | ✅              | ❌              | ❌              | ❌                 | ✅             |
-| **Triton**                      | ❌                          | ✅               | ✅              | ✅              | ✅              | ✅                 | ✅             |
-| **Torch Native (SDPA)**         | ❌                          | ✅               | ✅              | ❌              | ❌              | ❌                 | ✅             |
-| **FlexAttention (PyTorch)**     | ❌                          | ❌               | ✅              | ❌              | ❌              | ❌                 | ❌             |
-| **TRTLLM MHA**                  | 16, 32 or 64                | ✅               | ✅              | ✅              | ❌              | ✅                 | ❌             |
-| **Dual Chunk FlashAttention**   | ✅                          | ❌               | ❌              | ❌              | ❌              | ❌                 | ❌             |
-| **AITER (ROCm)**                | ✅                          | ✅               | ❌              | ✅              | ✅              | ✅                 | ✅             |
-| **Wave (ROCm)**                 | ✅                          | ❌               | ❌              | ❌              | ❌              | ❌                 | ❌             |
-| **Ascend (NPU)**                | ✅                          | ❌               | ❌              | ✅              | ❌              | ✅                 | ✅             |
-| **Intel XPU**                   | ✅                          | ❌               | ❌              | ❌              | ❌              | ✅                 | ❌             |
-| **Intel AMX (CPU)**             | ❌                          | ❌               | ❌              | ❌              | ❌              | ❌                 | ❌             |
+| **Backend**                     | **Page Size > 1 (native)** | **FP8 KV Cache** | **FP4 KV Cache** | **TurboQuant KV Cache** | **Spec topk=1** | **Spec topk>1** | **Sliding Window** | **MultiModal** |
+|---------------------------------|-----------------------------|------------------|-----------------|-------------------------|-----------------|-----------------|--------------------|----------------|
+| **FlashInfer**                  | ✅                          | ✅               | ❌              | ✅                      | ✅              | ✅              | ✅                 | ❌             |
+| **FA3 (FlashAttention 3)**      | ✅                          | ✅               | ❌              | ✅                      | ✅              | ✅              | ✅                 | ✅             |
+| **FA4 (FlashAttention 4)**      | 128                         | ❌               | ✅              | ❌                      | ❌              | ❌              | ❌                 | ✅             |
+| **Triton**                      | ❌                          | ✅               | ✅              | ✅                      | ✅              | ✅              | ✅                 | ✅             |
+| **Torch Native (SDPA)**         | ❌                          | ✅               | ✅              | ✅                      | ❌              | ❌              | ❌                 | ✅             |
+| **FlexAttention (PyTorch)**     | ❌                          | ❌               | ✅              | ✅                      | ❌              | ❌              | ❌                 | ❌             |
+| **TRTLLM MHA**                  | 16, 32 or 64                | ✅               | ✅              | ✅                      | ✅              | ❌              | ✅                 | ❌             |
+| **Dual Chunk FlashAttention**   | ✅                          | ❌               | ❌              | ✅                      | ❌              | ❌              | ❌                 | ❌             |
+| **AITER (ROCm)**                | ✅                          | ✅               | ❌              | ❌                      | ✅              | ✅              | ✅                 | ✅             |
+| **Wave (ROCm)**                 | ✅                          | ❌               | ❌              | ❌                      | ❌              | ❌              | ❌                 | ❌             |
+| **Ascend (NPU)**                | ✅                          | ❌               | ❌              | ❌                      | ✅              | ❌              | ✅                 | ✅             |
+| **Intel XPU**                   | ✅                          | ❌               | ❌              | ❌                      | ❌              | ❌              | ✅                 | ❌             |
+| **Intel AMX (CPU)**             | ❌                          | ❌               | ❌              | ❌                      | ❌              | ❌              | ❌                 | ❌             |
 
 ### MLA Backends
 
-| **Backend**                | **Native Page Sizes**     | **FP8 KV Cache** | **FP4 KV Cache** | **Chunked Prefix Cache** | **Spec topk=1** | **Spec topk>1** |
-|----------------------------|---------------------------|------------------|------------------|--------------------------|-----------------|-----------------|
-| **FlashInfer MLA**         | 1                         | ❌               | ✅               | ✅                       | ✅              | ❌              |
-| **FlashMLA**               | 64                        | ✅               | ✅               | ✅                       | ✅              | ❌              |
-| **Cutlass MLA**            | 128                       | ✅               | ✅               | ✅                       | ✅              | ❌              |
-| **TRTLLM MLA (Blackwell)** | 32 or 64                  | ✅               | ✅               | ✅                       | ✅              | ❌              |
-| **FA3 (FlashAttention 3)** | n/a                       | ❌               | ❌               | ✅                       | ✅              | ⚠️ (page_size=1 only) |
-| **Triton**                 | n/a                       | ❌               | ❌               | ❌                       | ✅              | ⚠️ (page_size=1 only) |
-| **FA4**                    | 1                         | ❌               | ✅               | ✅                       | ❌              | ❌              |
-| **Ascend MLA (NPU)**       | 128                       | ❌               | ❌               | ❌                       | ❌              | ❌              |
+All MLA backends use `set_mla_kv_buffer` (a separate code path from `set_kv_buffer`) and do **not** currently support TurboQuant KV cache — launching with `--kv-cache-dtype turboquant` on any MLA backend raises `NotImplementedError`.
+
+| **Backend**                | **Native Page Sizes**     | **FP8 KV Cache** | **FP4 KV Cache** | **TurboQuant KV Cache** | **Chunked Prefix Cache** | **Spec topk=1** | **Spec topk>1** |
+|----------------------------|---------------------------|------------------|------------------|-------------------------|--------------------------|-----------------|-----------------|
+| **FlashInfer MLA**         | 1                         | ❌               | ✅               | ❌                      | ✅                       | ✅              | ❌              |
+| **FlashMLA**               | 64                        | ✅               | ✅               | ❌                      | ✅                       | ✅              | ❌              |
+| **Cutlass MLA**            | 128                       | ✅               | ✅               | ❌                      | ✅                       | ✅              | ❌              |
+| **TRTLLM MLA (Blackwell)** | 32 or 64                  | ✅               | ✅               | ❌                      | ✅                       | ✅              | ❌              |
+| **FA3 (FlashAttention 3)** | n/a                       | ❌               | ❌               | ❌                      | ✅                       | ✅              | ⚠️ (page_size=1 only) |
+| **Triton**                 | n/a                       | ❌               | ❌               | ❌                      | ❌                       | ✅              | ⚠️ (page_size=1 only) |
+| **FA4**                    | 1                         | ❌               | ✅               | ❌                      | ✅                       | ❌              | ❌              |
+| **Ascend MLA (NPU)**       | 128                       | ❌               | ❌               | ❌                      | ❌                       | ❌              | ❌              |
 
 ```{note}
 Multimodal attention is selected by `--mm-attention-backend`. The "MultiModal" column indicates whether a corresponding multimodal implementation exists for that backend family.
